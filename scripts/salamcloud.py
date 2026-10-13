@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""SalamPlayer 云控：校验 control/、生成并签名 api/v1/control.json。
+"""校验 control/、生成并签名 api/v1/control.json。
 
   python3 scripts/salamcloud.py validate          只校验
   python3 scripts/salamcloud.py build             校验 + 生成 + 签名（需环境变量 SALAMCLOUD_SIGNING_KEY）

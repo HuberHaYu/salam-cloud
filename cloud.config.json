@@ -1,6 +1,6 @@
 {
-  "$comment": "云控全局配置。mirrors 是 App 的下载线路，顺序即初始优先级（与 HXAudio 云端相同）。",
-  "name": "SalamPlayer 云控",
+  "$comment": "mirrors：App 的下载线路，顺序即初始优先级。",
+  "name": "SalamPlayer",
   "owner": "HuberHaYu",
   "repo": "salam-cloud",
   "branch": "main",

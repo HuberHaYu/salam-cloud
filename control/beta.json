@@ -1,6 +1,14 @@
 {
   "$comment" : "内测规则。version_codes 为 [最小, 最大] 版本号（含）。enabled 为 true 时，在 expires_at（含时区）之后这些版本无法使用，并显示 message。",
   "rules" : [
-
+    {
+      "enabled" : true,
+      "expires_at" : "2026-10-01T16:05:12+08:00",
+      "message" : "本内测版已结束，请更新到正式版。",
+      "version_codes" : [
+        1,
+        100010
+      ]
+    }
   ]
 }

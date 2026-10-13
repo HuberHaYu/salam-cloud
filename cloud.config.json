@@ -1,0 +1,59 @@
+{
+  "$comment": "云控全局配置。mirrors 是 App 的下载线路，顺序即初始优先级（与 HXAudio 云端相同）。",
+  "name": "SalamPlayer 云控",
+  "owner": "HuberHaYu",
+  "repo": "salam-cloud",
+  "branch": "main",
+  "mirrors": [
+    {
+      "id": "gh-proxy",
+      "kind": "raw",
+      "url": "https://gh-proxy.com/https://raw.githubusercontent.com/{owner}/{repo}/{branch}/{path}"
+    },
+    {
+      "id": "jsdmirror",
+      "kind": "cdn",
+      "url": "https://cdn.jsdmirror.com/gh/{owner}/{repo}@{branch}/{path}"
+    },
+    {
+      "id": "ghproxy-net",
+      "kind": "raw",
+      "url": "https://ghproxy.net/https://raw.githubusercontent.com/{owner}/{repo}/{branch}/{path}"
+    },
+    {
+      "id": "jsd-onmicrosoft",
+      "kind": "cdn",
+      "url": "https://jsd.onmicrosoft.cn/gh/{owner}/{repo}@{branch}/{path}"
+    },
+    {
+      "id": "jsd-fastly",
+      "kind": "cdn",
+      "url": "https://fastly.jsdelivr.net/gh/{owner}/{repo}@{branch}/{path}"
+    },
+    {
+      "id": "ghfast",
+      "kind": "raw",
+      "url": "https://ghfast.top/https://raw.githubusercontent.com/{owner}/{repo}/{branch}/{path}"
+    },
+    {
+      "id": "jsd-cdn",
+      "kind": "cdn",
+      "url": "https://cdn.jsdelivr.net/gh/{owner}/{repo}@{branch}/{path}"
+    },
+    {
+      "id": "github-raw",
+      "kind": "raw",
+      "url": "https://raw.githubusercontent.com/{owner}/{repo}/{branch}/{path}"
+    },
+    {
+      "id": "jsd-gcore",
+      "kind": "cdn",
+      "url": "https://gcore.jsdelivr.net/gh/{owner}/{repo}@{branch}/{path}"
+    },
+    {
+      "id": "jsd-testingcf",
+      "kind": "cdn",
+      "url": "https://testingcf.jsdelivr.net/gh/{owner}/{repo}@{branch}/{path}"
+    }
+  ]
+}

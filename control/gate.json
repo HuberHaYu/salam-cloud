@@ -1,0 +1,7 @@
+{
+  "$comment": "订单号验证窗口。enabled 为 true 时，未验证的 App（版本号 >= from_version_code）启动时会弹出不可关闭的订单号验证窗口。",
+  "enabled": false,
+  "from_version_code": 1,
+  "title": "验证订单",
+  "message": "请输入购买时的订单号，验证后即可继续使用。"
+}

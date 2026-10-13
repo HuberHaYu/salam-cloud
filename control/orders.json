@@ -1,12 +1,16 @@
 {
-  "$comment": "订单号只存加盐 PBKDF2-SHA256 哈希（由 SalamCloud 在本地计算）。revoked 中的哈希即使已验证过也会失效。不要改 salt/iterations，否则已有哈希全部失效。",
-  "kdf": {
-    "algorithm": "PBKDF2-HMAC-SHA256",
-    "salt": "4f45a32f4ea9d9b37a54dd426b3e1640",
-    "iterations": 100000,
-    "length": 32,
-    "normalize": "去掉所有空白字符后转大写"
+  "$comment" : "订单号只存加盐 PBKDF2-SHA256 哈希（由 SalamCloud 在本地计算）。revoked 中的哈希即使已验证过也会失效。不要改 salt/iterations，否则已有哈希全部失效。",
+  "kdf" : {
+    "algorithm" : "PBKDF2-HMAC-SHA256",
+    "iterations" : 100000,
+    "length" : 32,
+    "normalize" : "去掉所有空白字符后转大写",
+    "salt" : "4f45a32f4ea9d9b37a54dd426b3e1640"
   },
-  "orders": [],
-  "revoked": []
+  "orders" : [
+
+  ],
+  "revoked" : [
+
+  ]
 }

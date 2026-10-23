@@ -31,3 +31,11 @@ jobs:
           git commit -m "build [skip ci]"
           git pull --rebase origin main
           git push origin HEAD:main
+      - name: purge jsDelivr cache
+        # jsDelivr caches @main for hours; without this, CDN routes keep serving the previous
+        # (still validly signed) control file and apps never see the new one.
+        run: |
+          for f in api/v1/control.json api/v1/control.json.sig; do
+            curl -fsS -m 30 "https://purge.jsdelivr.net/gh/${GITHUB_REPOSITORY}@main/$f" || echo "purge $f failed"
+            echo
+          done

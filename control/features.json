@@ -1,0 +1,4 @@
+{
+  "$comment" : "App 功能开关。atmos_quality：在线播放的「全景声」音质档位（音源的 atmos 档）。关闭后，App 在下次拉取云控时（冷启动、回到前台满 1 小时，或运行中每 1.5～2 小时）收起这一档。",
+  "atmos_quality" : false
+}

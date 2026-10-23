@@ -49,6 +49,21 @@ def validate():
         fail("gate.json: enabled 必须是 true/false")
     if not isinstance(gate.get("from_version_code"), int) or gate["from_version_code"] < 0:
         fail("gate.json: from_version_code 必须是非负整数")
+    if not isinstance(gate.get("challenge"), int) or gate["challenge"] < 0:
+        fail("gate.json: challenge 必须是非负整数（每发起一次验证 +1）")
+    if "max_attempts" in gate and (not isinstance(gate.get("max_attempts"), int)
+                                   or not 1 <= gate["max_attempts"] <= 20):
+        fail("gate.json: max_attempts 必须是 1–20 的整数")
+    for key, low, high in (("pending_round", 0, 10**9), ("grace_attempts", 0, 10)):
+        if key in gate and (not isinstance(gate.get(key), int) or not low <= gate[key] <= high):
+            fail(f"gate.json: {key} 必须是 {low}–{high} 的整数")
+    if "enroll_new_devices" in gate and not isinstance(gate.get("enroll_new_devices"), bool):
+        fail("gate.json: enroll_new_devices 必须是 true/false")
+    reverify = gate.get("reverify", {})
+    if not isinstance(reverify, dict) or any(
+            not re.fullmatch(r"[0-9a-f]{64}", str(k)) or not isinstance(v, int) or v < 0
+            for k, v in reverify.items()):
+        fail("gate.json: reverify 只能是 {订单哈希: 非负整数}")
     for key in ("title", "message"):
         if not isinstance(gate.get(key), str) or not gate[key].strip() or len(gate[key]) > 200:
             fail(f"gate.json: {key} 需要 1–200 字")
@@ -75,11 +90,16 @@ def validate():
         parse_time(str(rule.get("expires_at", "")), where)
         if not isinstance(rule.get("message"), str) or not rule["message"].strip():
             fail(f"{where}: message 不能为空")
-    return gate, orders, beta
+    # features.json is optional: without it every feature switch is off.
+    features = read("features.json") if (ROOT / "control" / "features.json").exists() else {}
+    for k, v in features.items():
+        if not k.startswith("$") and not isinstance(v, bool):
+            fail(f"features.json: {k} 必须是 true/false")
+    return gate, orders, beta, features
 
 
 def build():
-    gate, orders, beta = validate()
+    gate, orders, beta, features = validate()
     key = os.environ.get("SALAMCLOUD_SIGNING_KEY", "").strip()
     if not key:
         fail("缺少 SALAMCLOUD_SIGNING_KEY（仓库 Actions Secret）")
@@ -96,6 +116,7 @@ def build():
         "issued_at": dt.datetime.now(CST).replace(microsecond=0).isoformat(),
         "order_gate": {**strip(gate), "kdf": orders["kdf"], "orders": orders["orders"], "revoked": orders["revoked"]},
         "beta": beta["rules"],
+        "features": strip(features),
     }
     body = json.dumps(control, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode("utf-8")
     OUT.parent.mkdir(parents=True, exist_ok=True)

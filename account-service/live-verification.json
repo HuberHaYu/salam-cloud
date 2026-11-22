@@ -1,0 +1,20 @@
+{
+  "endpoint": "https://lnzisnmpmtqfplncfugn.supabase.co/functions/v1/salam-id",
+  "account_id": "SL-58C5B50DE89A87E64F64B00F1E34157B",
+  "checks": [
+    "real eligible order check",
+    "register with random username and unique ID",
+    "order-password and username-password login",
+    "wrong password rejected",
+    "concurrent device writes preserved and pulled",
+    "playlist edit and favorite deletion",
+    "other device receives only changed records",
+    "unchanged pull omits full library",
+    "rename retains account and enables new username login",
+    "password change and old-device session revocation"
+  ],
+  "result": "passed",
+  "archive": "verified",
+  "archiveRevision": 5,
+  "archiveBlob": "67f1b6dd3eac1635901abf7ad754e324f1323f13"
+}

@@ -1,0 +1,6 @@
+project_id = "salam-id"
+
+[functions.salam-id]
+enabled = true
+verify_jwt = false
+entrypoint = "./functions/salam-id/index.ts"

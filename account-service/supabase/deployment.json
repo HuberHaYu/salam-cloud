@@ -1,0 +1,12 @@
+{
+  "project_ref": "lnzisnmpmtqfplncfugn",
+  "organization_id": "ftmvskokvbjwrrzwwmrx",
+  "plan": "Free",
+  "region": "ap-southeast-1",
+  "function": "salam-id",
+  "endpoint": "https://lnzisnmpmtqfplncfugn.supabase.co/functions/v1/salam-id",
+  "data_api_enabled": false,
+  "custom_auth": true,
+  "paid_addons_enabled": false,
+  "github_repository": "HuberHaYu/salam-cloud"
+}

@@ -1,0 +1,12 @@
+{
+  "name": "salam-id-service",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test test/*.test.mjs",
+    "start": "node src/node-server.mjs"
+  },
+  "engines": {
+    "node": ">=24.14.0"
+  }
+}

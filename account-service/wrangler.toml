@@ -1,0 +1,24 @@
+name = "salam-id"
+main = "src/worker.mjs"
+compatibility_date = "2026-11-22"
+workers_dev = true
+
+[vars]
+GITHUB_REPOSITORY = "HuberHaYu/salam-cloud"
+GITHUB_BRANCH = "main"
+# Client registration is optional. Disable new registrations without disabling existing accounts.
+REGISTRATION_ENABLED = "true"
+
+[[durable_objects.bindings]]
+name = "ACCOUNTS"
+class_name = "AccountHub"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["AccountHub"]
+
+# Set with wrangler secret put; never put these values in source or Android:
+# PASSWORD_PEPPER: independent random 32-byte base64url secret, stored outside the database
+# AUTH_PEPPER: random 32-byte base64url secret
+# ARCHIVE_KEY: random AES-256 key, base64url; separately back up this key
+# GITHUB_APP_ID, GITHUB_INSTALLATION_ID, GITHUB_PRIVATE_KEY (PKCS#8 PEM)

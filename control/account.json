@@ -1,0 +1,8 @@
+{
+  "enabled": true,
+  "endpoint": "https://lnzisnmpmtqfplncfugn.supabase.co/functions/v1/salam-id",
+  "spki_pins": [
+    "sha256/B9zUXavotYYIs217h2OZnCqCTp2vB/2pNC1zDijcIAo=",
+    "sha256/kIdp6NNEd8wsugYyyIYFsi1ylMCED3hZbSR8ZFsa/A4="
+  ]
+}

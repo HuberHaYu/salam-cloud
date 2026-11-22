@@ -118,6 +118,29 @@ def build():
         "beta": beta["rules"],
         "features": strip(features),
     }
+    account_path = ROOT / "control" / "account.json"
+    if account_path.exists():
+        account = json.loads(account_path.read_text(encoding="utf-8"))
+        from urllib.parse import urlsplit
+        endpoint = account.get("endpoint", "").rstrip("/")
+        parsed = urlsplit(endpoint)
+        if account.get("enabled") and (parsed.scheme != "https" or not parsed.hostname
+                or parsed.username or parsed.password or parsed.query or parsed.fragment):
+            fail("account.json: endpoint 必须为有效 HTTPS 服务地址")
+        pins = account.get("spki_pins", [])
+        if account.get("enabled"):
+            import base64
+            try:
+                if not isinstance(pins, list) or not 1 <= len(pins) <= 4:
+                    raise ValueError()
+                for pin in pins:
+                    if not isinstance(pin, str) or not pin.startswith("sha256/"):
+                        raise ValueError()
+                    if len(base64.b64decode(pin[7:], validate=True)) != 32:
+                        raise ValueError()
+            except (ValueError, TypeError):
+                fail("account.json: 启用账号服务时须配置 1～4 个有效证书公钥 SHA-256 pin")
+        control["account"] = {"enabled": account.get("enabled") is True, "endpoint": endpoint, "spki_pins": pins}
     body = json.dumps(control, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode("utf-8")
     OUT.parent.mkdir(parents=True, exist_ok=True)
     OUT.write_bytes(body)

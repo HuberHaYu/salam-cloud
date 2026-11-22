@@ -5,6 +5,7 @@ import {hashPassword, verifyPassword, validatePassword} from './password.mjs';
 import {normalizeOrder, orderId, orderHash, username, usernameKey, randomUsername} from './order.mjs';
 import {adminSignature} from './admin.mjs';
 import {GitHubArchive} from './github.mjs';
+import {SongSharing} from './song-sharing.mjs';
 const TEN_MIN=600000, DAY=86400000;
 export const json=(data,status=200)=>new Response(JSON.stringify(data),{status,headers:{'Content-Type':'application/json; charset=utf-8','Cache-Control':'no-store','X-Content-Type-Options':'nosniff'}});
 export function configured(env){return ['AUTH_PEPPER','PASSWORD_PEPPER','ARCHIVE_KEY'].every(k=>SECRET.test(env[k]||''))
@@ -20,11 +21,18 @@ export class AccountService {
   }
   async handle(request){
     const path=new URL(request.url).pathname;
-    if(path==='/health')return json({service:'salam-id',version:5});
+    if(path==='/health')return json({service:'salam-id',version:6,features:['song-share']});
     if(!configured(this.env))return json({error:'账号服务暂未配置完成'},503);
     if(request.method!=='POST')return json({error:'仅支持 POST'},405);
     try{
       const body=await readJsonBody(request);
+      if(path.startsWith('/v1/share/')){
+        const action=()=>new SongSharing(this.ctx.storage,this.env).handle(path,body,request);
+        const hosted=this.ctx.storage.sharingTransaction;
+        const response=await (hosted?(path==='/v1/share/create'
+          ?this.ctx.storage.sharingTransaction(action,String(body.id||'')):action()):this.serial(action));
+        return json(response.data,response.status);
+      }
       // Music uses GitHub file-SHA concurrency; network waits never hold the account DB lock.
       if(path==='/v1/sync')return await this.route(path,body,request);
       if(path.startsWith('/admin/')){

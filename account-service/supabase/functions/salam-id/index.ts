@@ -39,7 +39,7 @@ Deno.serve(async request=>{
     const adjusted=new Request(url,{method:request.method,headers,body:['GET','HEAD'].includes(request.method)?undefined:request.body});
     const response=await service().fetch(adjusted);
     // Cron is the reliable driver. Opportunistic work drains an overdue checkpoint after activity.
-    EdgeRuntime.waitUntil(checkpoint().catch(()=>{}));
+    if(!url.pathname.startsWith('/v1/share/'))EdgeRuntime.waitUntil(checkpoint().catch(()=>{}));
     return response;
   }catch{return json({error:'服务暂不可用，请稍后重试'},503);}
 });

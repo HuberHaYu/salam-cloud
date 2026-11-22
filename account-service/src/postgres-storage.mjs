@@ -2,12 +2,13 @@
 export class PostgresStorage {
   constructor(sql){this.sql=sql;this.tx=null;}
   get query(){return this.tx||this.sql;}
-  async locked(fn){
+  async locked(fn,shareOwner=null){
     if(this.tx)throw new Error('Nested account lock');
     return this.sql.begin(async tx=>{
       await tx`SET LOCAL lock_timeout = '12s'`;
       await tx`SET LOCAL statement_timeout = '25s'`;
-      await tx`SELECT pg_advisory_xact_lock(1935764577, 1)`;
+      if(shareOwner!==null)await tx`SELECT pg_advisory_xact_lock(1935764578, hashtext(${shareOwner}))`;
+      else await tx`SELECT pg_advisory_xact_lock(1935764577, 1)`;
       this.tx=tx;
       try{return await fn();}finally{this.tx=null;}
     });
@@ -21,5 +22,20 @@ export class PostgresStorage {
     return new Map(rows.map(r=>[r.key,r.value]));
   }
   transaction(fn){return this.tx?fn(this):this.locked(()=>fn(this));}
+  sharingTransaction(fn,owner){return this.locked(fn,owner);}
+  async shareLimit(key,max,window,now){
+    const sql=this.query,value={count:1,until:now+window};
+    const rows=await sql`INSERT INTO salam_private.state(key,value) VALUES(${key},${sql.json(value)})
+      ON CONFLICT(key) DO UPDATE SET value=CASE WHEN (state.value->>'until')::bigint<=${now}
+        THEN excluded.value ELSE jsonb_set(state.value,'{count}',to_jsonb((state.value->>'count')::int+1)) END
+      WHERE (state.value->>'until')::bigint<=${now} OR (state.value->>'count')::int<${max} RETURNING key`;
+    return rows.length>0;
+  }
+  async reserveShare(key,value,now){
+    const sql=this.query;
+    const rows=await sql`INSERT INTO salam_private.state(key,value) VALUES(${key},${sql.json(value)})
+      ON CONFLICT(key) DO UPDATE SET value=excluded.value WHERE (state.value->>'until')::bigint<=${now} RETURNING key`;
+    return rows.length>0;
+  }
   getAlarm(){return this.get('$alarm');}setAlarm(time){return this.put('$alarm',time);}deleteAlarm(){return this.delete('$alarm');}
 }

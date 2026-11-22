@@ -1,0 +1,12 @@
+{
+  "result": "passed",
+  "scope": "agent-owned synthetic closed account only",
+  "checks": [
+    "account removed from list",
+    "current GitHub library removed",
+    "credentials replaced with minimal encrypted deletion marker",
+    "other account IDs unchanged",
+    "order configuration unchanged",
+    "repeated delete idempotent"
+  ]
+}

@@ -32,7 +32,11 @@ export class AccountService {
       if(!body||typeof body!=='object'||Array.isArray(body))return json({error:'请求格式不正确'},400);
       // Music uses GitHub file-SHA concurrency; network waits never hold the account DB lock.
       if(path==='/v1/sync')return await this.route(path,body,request);
-      if(path.startsWith('/admin/'))return await this.serial(()=>this.admin(path,body,request));
+      if(path.startsWith('/admin/')){
+        const result=await this.serial(()=>this.admin(path,body,request));
+        // Commit the deletion intent before external I/O. A failed request is safely resumable.
+        return result?.deleteId?await this.finishDeletion(result.deleteId):result;
+      }
       return await this.serial(()=>this.route(path,body,request));
     }catch(e){return json({error:e.status===429?'尝试较多，请稍后重试':'请求未完成，请稍后重试'},e.status===429?429:503);}
   }
@@ -60,7 +64,8 @@ export class AccountService {
   async checkedOrder(input){
     const order=normalizeOrder(input),gate=await this.control(),hash=await orderHash(order,gate.kdf);
     if(!gate.orders.includes(hash)||gate.revoked.includes(hash))return null;
-    return {id:await orderId(order,this.env.AUTH_PEPPER),hash,proof:await digest(this.env.AUTH_PEPPER,'order-proof:'+order)};
+    const rootId=await orderId(order,this.env.AUTH_PEPPER),directory=await this.directory();
+    return {rootId,id:directory.orders?.[rootId]||rootId,hash,proof:await digest(this.env.AUTH_PEPPER,'order-proof:'+order)};
   }
   async directory(){
     let d=await this.ctx.storage.get('directory');
@@ -69,8 +74,9 @@ export class AccountService {
     return d;
   }
   async load(id,restore=false){
+    const deleted=await this.ctx.storage.get('deleted/'+id);if(deleted)return {...deleted,id,closedAt:deleted.deletedAt,sessions:{}};
     let a=await this.ctx.storage.get('account/'+id);
-    if(!a&&restore){const archived=await this.github.read(id);if(archived){a=await unseal(this.env.ARCHIVE_KEY,id,archived);a.sessions={};a.committedRev=a.rev;await this.ctx.storage.put('account/'+id,a);}}
+    if(!a&&restore){const archived=await this.github.read(id);if(archived){a=await unseal(this.env.ARCHIVE_KEY,id,archived);if(a.deletedAt){await this.ctx.storage.put('deleted/'+id,{id,deletedAt:a.deletedAt});return {...a,closedAt:a.deletedAt,sessions:{}};}a.sessions={};a.committedRev=a.rev;await this.ctx.storage.put('account/'+id,a);}}
     return a;
   }
   async save(a,dirty,directory){
@@ -112,6 +118,13 @@ export class AccountService {
       const checked=await this.checkedOrder(normalized);
       if(!checked)return json({error:'当前订单清单中未找到有效订单，请核对编号或稍后重试'},401);
       let a=await this.load(checked.id,true);
+      if(a?.deletingAt)return json({error:'账号正在删除，请稍后再试'},403);
+      if(a?.deletedAt){
+        if(path==='/v1/order/check')return json({requiresSetup:true});
+        if(path!=='/v1/order/activate')return json({error:'账号已删除，请使用订单号重新开通'},401);
+        // A still-valid order may open a fresh identity; never reuse the deleted ID/local outbox.
+        checked.id='SL-'+crypto.randomUUID().replaceAll('-','').toUpperCase();a=null;
+      }
       // A collision must never merge two different orders, even with a truncated public ID.
       if(a&&!equal(a.orderProof,checked.proof))return json({error:'账号信息不匹配，请联系客服'},409);
       if(a?.closedAt)return json({error:'账号已注销，请联系管理员'},403);
@@ -125,7 +138,7 @@ export class AccountService {
         a={id:checked.id,username:name,orderHash:checked.hash,orderProof:checked.proof,
           password:await hashPassword(b.password,checked.id,this.env.PASSWORD_PEPPER),authVersion:1,
           rev:0,committedRev:0,generation:1,libraryVersion:1,createdAt:Date.now(),sessions:{}};
-        directory.users[name]=a.id;directory.generation++;
+        directory.users[name]=a.id;if(checked.id!==checked.rootId){directory.orders||={};directory.orders[checked.rootId]=a.id;}directory.generation++;
         const token=await this.issueSession(a);await this.save(a,true,directory);return this.response(a,{token});
       }
       // Repeating activation can log in with the original password; it can NEVER reset it.
@@ -139,7 +152,7 @@ export class AccountService {
       const d=await this.directory(),id=Object.hasOwn(d.users,name)?d.users[name]:null;
       const a=id?await this.load(id,true):null;
       if(!await this.passwordOK(a,b.password)||usernameKey(a.username)!==name)return json({error:'用户名或密码不正确'},401);
-      if(a.closedAt)return json({error:'账号已注销，请联系管理员'},403);
+      if(a.closedAt||a.deletingAt||a.deletedAt)return json({error:'账号已注销，请联系管理员'},403);
       const gate=await this.control();
       if(!gate.orders.includes(a.orderHash)||gate.revoked.includes(a.orderHash))return json({error:'订单信息已更新，请使用订单号登录核对'},401);
       const token=await this.issueSession(a);await this.save(a,false);return this.response(a,{token});
@@ -149,7 +162,7 @@ export class AccountService {
     const token=(request.headers.get('Authorization')||'').replace(/^Bearer /,'');
     if(!SECRET.test(token))return json({error:'请重新登录'},401);
     const a=await this.load(b.id),sessionKey=await digest(this.env.AUTH_PEPPER,'session:'+token);
-    if(!a||a.closedAt||!a.sessions[sessionKey]||a.sessions[sessionKey].expires<=Date.now())return json({error:'登录已失效，请重新登录'},401);
+    if(!a||a.closedAt||a.deletingAt||a.deletedAt||!a.sessions[sessionKey]||a.sessions[sessionKey].expires<=Date.now())return json({error:'登录已失效，请重新登录'},401);
     if(path==='/v1/logout'){delete a.sessions[sessionKey];await this.save(a,false);return json({ok:true});}
     if(path==='/v1/account/username'||path==='/v1/account/password'){
       await this.authLimit(request,a.id);
@@ -180,7 +193,7 @@ export class AccountService {
         if(!merged.duplicate) {
           // Recheck revocation immediately before committing. Do not persist any library payload in SQL.
           const latest=await this.load(auth.id);
-          if(!latest||latest.closedAt||latest.authVersion!==auth.authVersion)return json({error:'账号状态已变化，请重新登录'},401);
+          if(!latest||latest.closedAt||latest.deletingAt||latest.deletedAt||latest.authVersion!==auth.authVersion)return json({error:'账号状态已变化，请重新登录'},401);
           try{await this.github.writeLibrary(auth.id,await seal(this.env.ARCHIVE_KEY,auth.id,music),file?.sha);}
           catch(e){if([409,422].includes(e.status)&&attempt<2)continue;throw e;}
         }
@@ -213,7 +226,7 @@ export class AccountService {
       const all=await this.ctx.storage.list({prefix:'account/',limit:100,after:after?'account/'+after:''});
       const accounts=[...all.values()].filter(a=>a.id>after).sort((a,b)=>a.id.localeCompare(b.id)).slice(0,100);
       return json({accounts:accounts.map(a=>({id:a.id,username:a.username,orderHash:a.orderHash,createdAt:a.createdAt||null,
-        closedAt:a.closedAt||null,sessions:Object.values(a.sessions||{}).filter(s=>s.expires>Date.now()).length})),
+        closedAt:a.closedAt||null,deletingAt:a.deletingAt||null,sessions:Object.values(a.sessions||{}).filter(s=>s.expires>Date.now()).length})),
         next:accounts.length===100?accounts.at(-1).id:null});
     }
     if(path==='/admin/migrate') {
@@ -223,6 +236,16 @@ export class AccountService {
     }
     if(!ID.test(b.id||''))return json({error:'账号标识无效'},400);
     const a=await this.load(b.id);if(!a)return json({error:'账号不存在'},404);
+    if(path==='/admin/delete') {
+      if(b.confirmId!==a.id)return json({error:'请确认要删除的 Salam ID'},400);
+      if(a.deletedAt)return json({ok:true,id:a.id,deleted:true});
+      if(!a.closedAt)return json({error:'请先注销账号，再执行删除'},409);
+      if(String(b.closedAt||'')!==String(a.closedAt))return json({error:'账号状态已变化，请刷新列表后重新确认'},409);
+      if(!a.deletingAt){a.deletingAt=Date.now();a.sessions={};a.authVersion++;await this.save(a,false);await this.ctx.storage.delete('dirty/'+a.id);}
+      return {deleteId:a.id};
+    }
+    if(a.deletedAt)return json({error:'账号已删除，不能恢复'},410);
+    if(a.deletingAt)return json({error:'账号正在删除，请重试删除以完成清理'},409);
     if(path==='/admin/close'||path==='/admin/restore') {
       // Administrative closure is reversible. Order eligibility and the GitHub library are untouched.
       if(path==='/admin/close')a.closedAt=a.closedAt||Date.now();else delete a.closedAt;
@@ -230,6 +253,27 @@ export class AccountService {
       return json({ok:true,id:a.id,closedAt:a.closedAt||null});
     }
     return json({error:'接口不存在'},404);
+  }
+  async finishDeletion(id) {
+    return this.serial(async()=>{
+      const a=await this.load(id);
+      if(a?.deletedAt)return json({ok:true,id,deleted:true});
+      if(!a?.deletingAt||!a.closedAt)return json({error:'账号删除状态已变化'},409);
+      const directory=await this.directory(),key=usernameKey(a.username);
+      if(directory.users[key]===id)delete directory.users[key];
+      directory.generation++;
+      // Keep only a minimal encrypted deletion marker: old archive recovery must not resurrect identity.
+      const marker={id,deletedAt:a.deletingAt};
+      const files=[{id,envelope:await seal(this.env.ARCHIVE_KEY,id,marker)},
+        {id:'directory',envelope:await seal(this.env.ARCHIVE_KEY,'directory',directory)}];
+      if(await this.github.readLibrary(id))files.push({path:'accounts/library/v1/'+id+'.json',remove:true});
+      await this.github.commit(files);
+      await this.ctx.storage.transaction(async tx=>{
+        await tx.put('deleted/'+id,marker);await tx.put('directory',directory);
+        await tx.delete(['account/'+id,'dirty/'+id,'directoryDirty']);
+      });
+      return json({ok:true,id,deleted:true});
+    });
   }
   async alarm(){
     if(this.flushing)return;this.flushing=true;let retryAt=Date.now()+TEN_MIN;
@@ -245,9 +289,21 @@ export class AccountService {
         if(files.length&&total+size>1800000)break;files.push({id:a.id,envelope,generation:a.generation,rev:a.rev});total+=size;}
       if(snapshot.directory)files.push({id:'directory',generation:snapshot.directory.generation,envelope:await seal(this.env.ARCHIVE_KEY,'directory',snapshot.directory)});
       if(files.length){
-        await this.github.commit(files);
         await this.serial(async()=>{
-          for(const file of files)await this.ctx.storage.transaction(async tx=>{
+          // Deletion and backup publication share this lock. Revalidate snapshots after waiting:
+          // a stale in-flight backup must never restore a removed account or username index.
+          const publish=[];
+          for(const file of files){
+            if(file.id==='directory'){
+              const current=await this.ctx.storage.get('directory');
+              if(current?.generation===file.generation)publish.push(file);
+            }else{
+              const current=await this.load(file.id);
+              if(current&&!current.deletedAt&&!current.deletingAt&&current.generation===file.generation)publish.push(file);
+            }
+          }
+          if(publish.length)await this.github.commit(publish);
+          for(const file of publish)await this.ctx.storage.transaction(async tx=>{
             if(file.id==='directory'){if(await tx.get('directoryDirty')===file.generation)await tx.delete('directoryDirty');return;}
             const a=await tx.get('account/'+file.id);if(!a)return;
             a.committedRev=Math.max(a.committedRev||0,file.rev);await tx.put('account/'+file.id,a);

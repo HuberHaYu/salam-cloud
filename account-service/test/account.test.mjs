@@ -29,7 +29,7 @@ function fixture(){
  const storage=new Storage(),env={AUTH_PEPPER:identityPepper,PASSWORD_PEPPER:randomSecret(),ARCHIVE_KEY:randomSecret(),REGISTRATION_ENABLED:'true',GITHUB_TOKEN:'test-only-owner-token'};
  const hub=new AccountService({storage},env),commits=[],libraries=new Map();let controlReads=0,libraryReads=0,libraryWrites=0;
  hub.github={read:async()=>null,readLibrary:async id=>{libraryReads++;return structuredClone(libraries.get(id)||null);},
- writeLibrary:async(id,envelope,sha)=>{if(libraries.get(id)?.sha!==sha){const e=new Error('CAS conflict');e.status=409;throw e;}libraryWrites++;const next=String(libraryWrites);libraries.set(id,{sha:next,envelope:structuredClone(envelope)});return next;},commit:async f=>commits.push(f),control:async()=>{controlReads++;return {serial:1,order_gate:{kdf,orders:hashes,revoked:[]}};}};
+ writeLibrary:async(id,envelope,sha)=>{if(libraries.get(id)?.sha!==sha){const e=new Error('CAS conflict');e.status=409;throw e;}libraryWrites++;const next=String(libraryWrites);libraries.set(id,{sha:next,envelope:structuredClone(envelope)});return next;},commit:async f=>{commits.push(structuredClone(f));for(const file of f)if(file.remove)libraries.delete(file.path.split('/').at(-1).replace(/\.json$/,''));},control:async()=>{controlReads++;return {serial:1,order_gate:{kdf,orders:hashes,revoked:[]}};}};
  return {hub,storage,env,commits,libraries,counts:()=>({reads:libraryReads,writes:libraryWrites}),controlReads:()=>controlReads};
 }
 async function call(hub,path,body,token=''){
@@ -109,7 +109,7 @@ test('archive failure retains dirty data; writes arriving during commit are not 
  assert.equal((await storage.list({prefix:'dirty/'})).size,1);assert.ok(storage.alarm>Date.now());
  let begin,finish;const started=new Promise(r=>begin=r),release=new Promise(r=>finish=r);
  hub.github.commit=async()=>{begin();await release;};const job=hub.alarm();await started;
- await call(hub,'/v1/account/username',{id:a.id,username:'renamed_during_archive',currentPassword:password},a.token);finish();await job;
+ const rename=call(hub,'/v1/account/username',{id:a.id,username:'renamed_during_archive',currentPassword:password},a.token);finish();await job;await rename;
  assert.equal((await storage.list({prefix:'dirty/'})).size,1);
 });
 test('encrypted account and username directory restore; raw secrets and sessions do not',async()=>{
@@ -232,4 +232,57 @@ test('multilingual display rename keeps ID while case-insensitive login and uniq
  await f.hub.alarm();const archived=new Map(f.commits.flat().map(x=>[x.id,x.envelope]));
  await f.storage.delete(['directory','account/'+a.id]);f.hub.github.read=async id=>archived.get(id)||null;
  assert.equal((await call(f.hub,'/v1/username/login',{username:'小雨-カナ_abc',password})).data.username,'小雨-カナ_ABC');
+});
+
+async function deleteBody(f,id){const a=await f.storage.get('account/'+id);return {id,confirmId:id,closedAt:String(a.closedAt)};}
+test('deletion requires a closed account and exact confirmation; removes it without touching order eligibility',async()=>{
+ const f=fixture(),a=await activate(f.hub);
+ await call(f.hub,'/v1/sync',{id:a.id,device:d1,seq:1,ops:[op('f:a',song(5))]},a.token);
+ assert.equal((await admin(f,'/admin/delete',{id:a.id,confirmId:a.id})).status,409);
+ await admin(f,'/admin/close',{id:a.id});const body=await deleteBody(f,a.id),orders=JSON.stringify(await f.storage.get('orderControl'));
+ assert.equal((await admin(f,'/admin/delete',{...body,confirmId:idB})).status,400);
+ assert.equal((await admin(f,'/admin/delete',{...body,closedAt:'1'})).status,409);
+ assert.equal((await admin(f,'/admin/delete',body)).status,200);
+ assert.equal((await admin(f,'/admin/accounts')).data.accounts.length,0);
+ assert.equal(await f.storage.get('account/'+a.id),undefined);assert.equal(await f.storage.get('dirty/'+a.id),undefined);
+ assert.equal((await f.storage.get('directory')).users[usernameKey(a.username)],undefined);assert.equal(f.libraries.size,0);
+ assert.equal(JSON.stringify(await f.storage.get('orderControl')),orders);
+ assert.equal((await admin(f,'/admin/restore',{id:a.id})).status,410);
+ assert.equal((await call(f.hub,'/v1/sync',{id:a.id},a.token)).status,401);
+ assert.equal((await admin(f,'/admin/delete',body)).status,200);
+ const marker=await unseal(f.env.ARCHIVE_KEY,a.id,f.commits.at(-1).find(x=>x.id===a.id).envelope);
+ assert.deepEqual(Object.keys(marker).sort(),['deletedAt','id']);
+});
+test('deleted order can open a fresh identity without restoring the old music, password, username or device state',async()=>{
+ const f=fixture(),a=await activate(f.hub);await admin(f,'/admin/close',{id:a.id});await admin(f,'/admin/delete',await deleteBody(f,a.id));
+ assert.equal((await call(f.hub,'/v1/order/check',{order:orderA})).data.requiresSetup,true);
+ assert.equal((await call(f.hub,'/v1/order/login',{order:orderA,password})).status,401);
+ const next=await activate(f.hub,orderA,'new account password');assert.notEqual(next.id,a.id);assert.notEqual(next.username,a.username);
+ assert.equal((await call(f.hub,'/v1/order/login',{order:orderA,password})).status,401);
+ assert.equal((await call(f.hub,'/v1/order/login',{order:orderA,password:'new account password'})).data.id,next.id);
+ assert.deepEqual((await call(f.hub,'/v1/sync',{id:next.id},next.token)).data.records,{});
+ await f.hub.alarm();const files=new Map(f.commits.flat().filter(x=>x.id).map(x=>[x.id,x.envelope]));
+ await f.storage.delete(['directory','account/'+next.id]);f.hub.github.read=async id=>files.get(id)||null;
+ assert.equal((await call(f.hub,'/v1/order/login',{order:orderA,password:'new account password'})).data.id,next.id);
+ // Losing only the SQL deletion marker still cannot resurrect the archived deleted identity.
+ await f.storage.delete('deleted/'+a.id);const restored=await f.hub.load(a.id,true);assert.ok(restored.deletedAt);assert.equal(await f.storage.get('account/'+a.id),undefined);
+});
+test('failed deletion stays closed and visible for retry, then completes without leftover library data',async()=>{
+ const f=fixture(),a=await activate(f.hub);await admin(f,'/admin/close',{id:a.id});const body=await deleteBody(f,a.id);
+ const commit=f.hub.github.commit;f.hub.github.commit=async()=>{throw new Error('offline');};
+ assert.equal((await admin(f,'/admin/delete',body)).status,503);
+ assert.ok((await f.storage.get('account/'+a.id)).deletingAt);
+ assert.equal((await admin(f,'/admin/restore',{id:a.id})).status,409);
+ assert.equal((await call(f.hub,'/v1/order/login',{order:orderA,password})).status,403);
+ f.hub.github.commit=commit;assert.equal((await admin(f,'/admin/delete',body)).status,200);
+ assert.equal((await admin(f,'/admin/accounts')).data.accounts.length,0);
+});
+test('in-flight account backup cannot resurrect a subsequently deleted account',async()=>{
+ const f=fixture(),a=await activate(f.hub);await admin(f,'/admin/close',{id:a.id});const body=await deleteBody(f,a.id);
+ let start,finish;const started=new Promise(r=>start=r),release=new Promise(r=>finish=r),commit=f.hub.github.commit;
+ let first=true;f.hub.github.commit=async files=>{if(first){first=false;start();await release;}await commit(files);};
+ const backup=f.hub.alarm();await started;const deletion=admin(f,'/admin/delete',body);finish();await backup;
+ assert.equal((await deletion).status,200);await f.hub.alarm();
+ const latest=f.commits.flat().filter(x=>x.id===a.id).at(-1);assert.ok((await unseal(f.env.ARCHIVE_KEY,a.id,latest.envelope)).deletedAt);
+ assert.equal((await f.storage.get('directory')).users[usernameKey(a.username)],undefined);
 });

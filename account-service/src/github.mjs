@@ -66,7 +66,8 @@ export class GitHubArchive {
     const ref=await this.send(this.root+'/git/ref/heads/'+branch);
     const parent=await this.send(this.root+'/git/commits/'+ref.object.sha);
     const tree=await this.send(this.root+'/git/trees','POST',{base_tree:parent.tree.sha,
-      tree:files.map(f=>({path:'accounts/v1/'+f.id+'.json',mode:'100644',type:'blob',content:JSON.stringify(f.envelope)}))});
+      tree:files.map(f=>({path:f.path||'accounts/v1/'+f.id+'.json',mode:'100644',type:'blob',
+        ...(f.remove?{sha:null}:{content:JSON.stringify(f.envelope)})}))});
     const commit=await this.send(this.root+'/git/commits','POST',{message:'Salam ID encrypted checkpoint',tree:tree.sha,parents:[ref.object.sha]});
     // Non-fast-forward is deliberately rejected. A later alarm rebuilds on the latest branch.
     await this.send(this.root+'/git/refs/heads/'+branch,'PATCH',{sha:commit.sha,force:false});

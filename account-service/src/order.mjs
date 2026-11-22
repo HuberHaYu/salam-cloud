@@ -22,10 +22,16 @@ export async function orderHash(input,kdf) {
   return hex(new Uint8Array(await crypto.subtle.deriveBits({name:'PBKDF2',hash:'SHA-256',salt,iterations:kdf.iterations},key,kdf.length*8)));
 }
 export function maskOrder(order){return order.length<=8?'••••':order.slice(0,4)+'••••'+order.slice(-4);}
+// Keep the display spelling; use a separate compatibility/case-normalized login key.
+// Existing names already used NFKC + lowercase keys, so the index needs no migration.
+export function usernameKey(name) { return name.normalize('NFKC').trim().toLowerCase().normalize('NFC'); }
 export function username(input) {
   if(typeof input!=='string')throw new Error('请输入用户名');
-  const name=input.normalize('NFKC').trim().toLowerCase();
-  if(['__proto__','constructor','prototype'].includes(name)||!/^[\p{L}\p{N}_]{3,24}$/u.test(name))throw new Error('用户名需为 3～24 个字母、汉字、数字或下划线');
+  const name=input.normalize('NFC').trim(),length=[...name].length,key=usernameKey(name);
+  if(length<3||length>24||['__proto__','constructor','prototype'].includes(key)
+      ||!/^[\p{L}\p{N}_-][\p{L}\p{N}\p{M}_-]*$/u.test(name)
+      ||/\p{Default_Ignorable_Code_Point}/u.test(name))
+    throw new Error('用户名需为 3～24 个字符，支持中日文等文字、数字、横线和下划线');
   return name;
 }
 export function randomUsername(){return 'salam_'+hex(crypto.getRandomValues(new Uint8Array(8)));}

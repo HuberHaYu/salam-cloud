@@ -1,6 +1,6 @@
 import {ID, SECRET, digest, equal, randomSecret, merge, seal, unseal} from './core.mjs';
 import {hashPassword, verifyPassword, validatePassword} from './password.mjs';
-import {normalizeOrder, orderId, orderHash, username, randomUsername} from './order.mjs';
+import {normalizeOrder, orderId, orderHash, username, usernameKey, randomUsername} from './order.mjs';
 import {adminSignature} from './admin.mjs';
 import {GitHubArchive} from './github.mjs';
 const TEN_MIN=600000, DAY=86400000;
@@ -134,11 +134,11 @@ export class AccountService {
       const token=await this.issueSession(a);await this.save(a,false);return this.response(a,{token});
     }
     if(path==='/v1/username/login'){
-      let name;try{name=username(b.username);}catch{return json({error:'用户名或密码不正确'},401);}
+      let name;try{name=usernameKey(username(b.username));}catch{return json({error:'用户名或密码不正确'},401);}
       await this.authLimit(request,name);
       const d=await this.directory(),id=Object.hasOwn(d.users,name)?d.users[name]:null;
       const a=id?await this.load(id,true):null;
-      if(!await this.passwordOK(a,b.password)||a.username!==name)return json({error:'用户名或密码不正确'},401);
+      if(!await this.passwordOK(a,b.password)||usernameKey(a.username)!==name)return json({error:'用户名或密码不正确'},401);
       if(a.closedAt)return json({error:'账号已注销，请联系管理员'},403);
       const gate=await this.control();
       if(!gate.orders.includes(a.orderHash)||gate.revoked.includes(a.orderHash))return json({error:'订单信息已更新，请使用订单号登录核对'},401);
@@ -156,8 +156,8 @@ export class AccountService {
       if(!await this.passwordOK(a,b.currentPassword))return json({error:'当前密码不正确'},403);
       if(path==='/v1/account/username'){
         let name;try{name=username(b.username);}catch(e){return json({error:e.message},400);}
-        const d=await this.directory();if(Object.hasOwn(d.users,name)&&d.users[name]!==a.id)return json({error:'该用户名已被使用'},409);
-        if(name!==a.username){delete d.users[a.username];d.users[name]=a.id;d.generation++;a.username=name;a.generation++;await this.save(a,true,d);}
+        const key=usernameKey(name),d=await this.directory();if(Object.hasOwn(d.users,key)&&d.users[key]!==a.id)return json({error:'该用户名已被使用'},409);
+        if(name!==a.username){delete d.users[usernameKey(a.username)];d.users[key]=a.id;d.generation++;a.username=name;a.generation++;await this.save(a,true,d);}
         return this.response(a);
       }
       try{validatePassword(b.newPassword);}catch(e){return json({error:e.message},400);}

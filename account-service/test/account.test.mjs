@@ -4,7 +4,7 @@ import {pbkdf2Sync,generateKeyPairSync,sign} from 'node:crypto';
 import {verifyControl} from '../src/public-control.mjs';
 import {merge,seal,unseal,randomSecret} from '../src/core.mjs';
 import {hashPassword,verifyPassword,PASSWORD_ITERATIONS} from '../src/password.mjs';
-import {normalizeOrder,orderId,orderHash} from '../src/order.mjs';
+import {normalizeOrder,orderId,orderHash,username,usernameKey} from '../src/order.mjs';
 import {adminSignature} from '../src/admin.mjs';
 import {AccountService} from '../src/service.mjs';
 import {GitHubArchive} from '../src/github.mjs';
@@ -208,4 +208,28 @@ test('admin requests are signed and single-use; closure revokes sessions without
  assert.equal((await admin(f,'/admin/restore',{id:a.id})).status,200);
  assert.equal((await call(f.hub,'/v1/order/login',{order:orderA,password})).status,200);
  assert.equal((await call(f.hub,'/v1/sync',{id:a.id},a.token)).status,401);
+});
+
+test('multilingual usernames preserve case, support hyphens, kana and combining letters',()=>{
+ for(const name of ['Salam-ID_01','小雨-音楽_AbC','さくら_カナ-A','가나다-A','Cafe\u0301-ID','नमस्ते-ID']) {
+   assert.equal(username(name),name.normalize('NFC'));
+ }
+ assert.equal(usernameKey(username('Ｓａｌａｍ-ID')),usernameKey('salam-id'));
+ assert.equal(usernameKey(username('Cafe\u0301-ID')),usernameKey('CAFÉ-id'));
+ for(const name of ['ab','x'.repeat(25),'空 格-A','a\nB','a\u200bB','音楽\ufe0f-A','\u0301Ab','__PROTO__'])assert.throws(()=>username(name));
+});
+test('multilingual display rename keeps ID while case-insensitive login and uniqueness remain stable',async()=>{
+ const f=fixture(),a=await activate(f.hub),b=await activate(f.hub,orderB);
+ const rename=(account,name)=>call(f.hub,'/v1/account/username',{id:account.id,username:name,currentPassword:password},account.token);
+ const changed=await rename(a,'小雨-カナ_AbC');assert.equal(changed.status,200);assert.equal(changed.data.username,'小雨-カナ_AbC');assert.equal(changed.data.id,a.id);
+ const login=await call(f.hub,'/v1/username/login',{username:'小雨-カナ_aBc',password});assert.equal(login.status,200);assert.equal(login.data.username,'小雨-カナ_AbC');
+ assert.equal((await rename(b,'小雨-カナ_abc')).status,409);
+ const caseOnly=await rename(a,'小雨-カナ_ABC');assert.equal(caseOnly.status,200);assert.equal(caseOnly.data.username,'小雨-カナ_ABC');
+ assert.equal((await f.storage.get('directory')).users[usernameKey(caseOnly.data.username)],a.id);
+ assert.equal((await call(f.hub,'/v1/username/login',{username:a.username,password})).status,401);
+ // The legacy lowercase index resolves even when the input is uppercase.
+ assert.equal((await call(f.hub,'/v1/username/login',{username:b.username.toUpperCase(),password})).data.id,b.id);
+ await f.hub.alarm();const archived=new Map(f.commits.flat().map(x=>[x.id,x.envelope]));
+ await f.storage.delete(['directory','account/'+a.id]);f.hub.github.read=async id=>archived.get(id)||null;
+ assert.equal((await call(f.hub,'/v1/username/login',{username:'小雨-カナ_abc',password})).data.username,'小雨-カナ_ABC');
 });

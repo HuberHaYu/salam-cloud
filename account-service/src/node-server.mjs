@@ -18,8 +18,8 @@ export class SqliteStorage {
       get:async key=>{const r=this.db.prepare('SELECT value FROM state WHERE key=?').get(key);return r?JSON.parse(r.value):undefined;},
       put:async(key,value)=>{this.db.prepare('INSERT INTO state(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value').run(key,JSON.stringify(value));},
       delete:async keys=>{const stmt=this.db.prepare('DELETE FROM state WHERE key=?');for(const key of Array.isArray(keys)?keys:[keys])stmt.run(key);},
-      list:async({prefix='',limit=1000}={})=>new Map(this.db.prepare('SELECT key,value FROM state WHERE key>=? AND key<? ORDER BY key LIMIT ?')
-        .all(prefix,prefix+'\uffff',limit).map(r=>[r.key,JSON.parse(r.value)]))
+      list:async({prefix='',limit=1000,after=''}={})=>new Map(this.db.prepare('SELECT key,value FROM state WHERE key>=? AND key<? AND key>? ORDER BY key LIMIT ?')
+        .all(prefix,prefix+'\uffff',after,limit).map(r=>[r.key,JSON.parse(r.value)]))
     };
   }
   serial(fn){const p=this.tail.then(fn);this.tail=p.catch(()=>{});return p;}

@@ -39,6 +39,21 @@ export class GitHubArchive {
     }catch(e){if(optional&&e.status===404)return null;throw e;}
   }
   async read(id) { return this.readJson('accounts/v1/'+id+'.json',true); }
+  // Contents API reads the current file and its compare-and-swap SHA in one request.
+  async readLibrary(id) {
+    try {
+      const f=await this.send(this.root+'/contents/accounts/library/v1/'+id+'.json?ref='+encodeURIComponent(this.env.GITHUB_BRANCH||'main'));
+      if(f.encoding!=='base64'||f.size>1500000||!f.sha)throw new Error('Invalid music file');
+      return {sha:f.sha,envelope:JSON.parse(new TextDecoder().decode(unb64(f.content.replace(/\s/g,''))))};
+    }catch(e){if(e.status===404)return null;throw e;}
+  }
+  async writeLibrary(id,envelope,sha) {
+    const bytes=new TextEncoder().encode(JSON.stringify(envelope));let raw='';
+    for(let i=0;i<bytes.length;i+=8192)raw+=String.fromCharCode(...bytes.subarray(i,i+8192));
+    const result=await this.send(this.root+'/contents/accounts/library/v1/'+id+'.json','PUT',{
+      message:'Salam ID manual library sync',branch:this.env.GITHUB_BRANCH||'main',content:btoa(raw),...(sha?{sha}:{})});
+    return result.content.sha;
+  }
   async control(minimumSerial=0) {
     if(this.env.GITHUB_PUBLIC_MIRRORS==='true')try{
       return await mirroredControl(this.env.GITHUB_REPOSITORY,this.env.GITHUB_BRANCH||'main',minimumSerial);

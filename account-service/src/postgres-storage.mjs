@@ -15,9 +15,9 @@ export class PostgresStorage {
   async get(key){const rows=await this.query`SELECT value FROM salam_private.state WHERE key=${key}`;return rows[0]?.value;}
   async put(key,value){const sql=this.query;await sql`INSERT INTO salam_private.state(key,value) VALUES(${key},${sql.json(value)}) ON CONFLICT(key) DO UPDATE SET value=excluded.value`;}
   async delete(keys){const list=Array.isArray(keys)?keys:[keys];if(list.length)await this.query`DELETE FROM salam_private.state WHERE key=ANY(${list}::text[])`;}
-  async list({prefix='',limit=1000}={}){
+  async list({prefix='',limit=1000,after=''}={}){
     const pattern=prefix.replace(/[\\%_]/g,'\\$&')+'%';
-    const rows=await this.query`SELECT key,value FROM salam_private.state WHERE key LIKE ${pattern} ORDER BY key LIMIT ${limit}`;
+    const rows=await this.query`SELECT key,value FROM salam_private.state WHERE key LIKE ${pattern} AND key>${after} ORDER BY key LIMIT ${limit}`;
     return new Map(rows.map(r=>[r.key,r.value]));
   }
   transaction(fn){return this.tx?fn(this):this.locked(()=>fn(this));}

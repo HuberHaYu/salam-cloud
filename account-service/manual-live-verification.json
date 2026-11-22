@@ -1,0 +1,19 @@
+{
+  "endpoint": "https://lnzisnmpmtqfplncfugn.supabase.co/functions/v1/salam-id",
+  "result": "passed",
+  "checks": [
+    "login returns identity only",
+    "manual write acknowledged only after encrypted GitHub commit",
+    "unchanged manual pull performs no GitHub write",
+    "retry is idempotent",
+    "Mac admin closure blocks login and old sessions",
+    "admin restore allows fresh login only",
+    "admin lifecycle leaves orders and music unchanged",
+    "synthetic account left closed"
+  ],
+  "hostTests": 21,
+  "androidTypeErrors": 0,
+  "macBuild": "passed, not installed",
+  "musicStorage": "GitHub",
+  "automaticMusicSync": false
+}

@@ -5,6 +5,7 @@ import {verifyControl} from '../src/public-control.mjs';
 import {merge,seal,unseal,randomSecret} from '../src/core.mjs';
 import {hashPassword,verifyPassword,PASSWORD_ITERATIONS} from '../src/password.mjs';
 import {normalizeOrder,orderId,orderHash} from '../src/order.mjs';
+import {adminSignature} from '../src/admin.mjs';
 import {AccountService} from '../src/service.mjs';
 import {GitHubArchive} from '../src/github.mjs';
 import {SqliteStorage} from '../src/node-server.mjs';
@@ -21,14 +22,15 @@ class Storage {
  constructor(){this.map=new Map();this.alarm=null;}
  async get(k){return structuredClone(this.map.get(k));}async put(k,v){this.map.set(k,structuredClone(v));}
  async delete(keys){for(const k of Array.isArray(keys)?keys:[keys])this.map.delete(k);}
- async list({prefix='',limit=1000}={}){return new Map([...this.map].filter(([k])=>k.startsWith(prefix)).sort(([a],[b])=>a.localeCompare(b)).slice(0,limit).map(([k,v])=>[k,structuredClone(v)]));}
+ async list({prefix='',limit=1000,after=''}={}){return new Map([...this.map].filter(([k])=>k.startsWith(prefix)&&k>after).sort(([a],[b])=>a.localeCompare(b)).slice(0,limit).map(([k,v])=>[k,structuredClone(v)]));}
  async transaction(fn){return fn(this);}async getAlarm(){return this.alarm;}async setAlarm(t){this.alarm=t;}async deleteAlarm(){this.alarm=null;}
 }
 function fixture(){
- const storage=new Storage(),env={AUTH_PEPPER:identityPepper,PASSWORD_PEPPER:randomSecret(),ARCHIVE_KEY:randomSecret(),REGISTRATION_ENABLED:'true'};
- const hub=new AccountService({storage},env),commits=[];let controlReads=0;
- hub.github={read:async()=>null,commit:async f=>commits.push(f),control:async()=>{controlReads++;return {serial:1,order_gate:{kdf,orders:hashes,revoked:[]}};}};
- return {hub,storage,env,commits,controlReads:()=>controlReads};
+ const storage=new Storage(),env={AUTH_PEPPER:identityPepper,PASSWORD_PEPPER:randomSecret(),ARCHIVE_KEY:randomSecret(),REGISTRATION_ENABLED:'true',GITHUB_TOKEN:'test-only-owner-token'};
+ const hub=new AccountService({storage},env),commits=[],libraries=new Map();let controlReads=0,libraryReads=0,libraryWrites=0;
+ hub.github={read:async()=>null,readLibrary:async id=>{libraryReads++;return structuredClone(libraries.get(id)||null);},
+ writeLibrary:async(id,envelope,sha)=>{if(libraries.get(id)?.sha!==sha){const e=new Error('CAS conflict');e.status=409;throw e;}libraryWrites++;const next=String(libraryWrites);libraries.set(id,{sha:next,envelope:structuredClone(envelope)});return next;},commit:async f=>commits.push(f),control:async()=>{controlReads++;return {serial:1,order_gate:{kdf,orders:hashes,revoked:[]}};}};
+ return {hub,storage,env,commits,libraries,counts:()=>({reads:libraryReads,writes:libraryWrites}),controlReads:()=>controlReads};
 }
 async function call(hub,path,body,token=''){
  const r=await hub.fetch(new Request('https://account.example'+path,{method:'POST',headers:{'Content-Type':'application/json','CF-Connecting-IP':'192.0.2.1',Authorization:'Bearer '+token},body:JSON.stringify(body)}));
@@ -107,7 +109,7 @@ test('archive failure retains dirty data; writes arriving during commit are not 
  assert.equal((await storage.list({prefix:'dirty/'})).size,1);assert.ok(storage.alarm>Date.now());
  let begin,finish;const started=new Promise(r=>begin=r),release=new Promise(r=>finish=r);
  hub.github.commit=async()=>{begin();await release;};const job=hub.alarm();await started;
- await call(hub,'/v1/sync',{id:a.id,device:d1,seq:1,ops:[op('f:a',song(1))]},a.token);finish();await job;
+ await call(hub,'/v1/account/username',{id:a.id,username:'renamed_during_archive',currentPassword:password},a.token);finish();await job;
  assert.equal((await storage.list({prefix:'dirty/'})).size,1);
 });
 test('encrypted account and username directory restore; raw secrets and sessions do not',async()=>{
@@ -153,4 +155,57 @@ test('delta pulls omit unchanged libraries and echo submitted conflict keys even
  assert.deepEqual(conflict.data.conflicts,['f:a']);assert.equal(conflict.data.records['f:a'].value.uri,song(1).uri);
  const deleted=await call(hub,'/v1/sync',{id:a.id,device:d1,seq:2,since:first.data.rev,ops:[op('f:a',null,first.data.rev)]},a.token);
  assert.equal(deleted.data.records['f:a'].value,null);
+});
+
+async function admin(f,path,body={},signatureOverride) {
+ const time=String(Date.now()),nonce=crypto.randomUUID().replaceAll('-','');
+ const signature=signatureOverride||await adminSignature(f.env.GITHUB_TOKEN,time,nonce,path,JSON.stringify(body));
+ const req=new Request('https://account.example'+path,{method:'POST',headers:{Authorization:`SalamAdmin ${time}:${nonce}:${signature}`},body:JSON.stringify(body)});
+ const copy=req.clone(),response=await f.hub.fetch(req);
+ return {status:response.status,data:await response.json(),replay:copy};
+}
+test('music only lives in GitHub; unchanged manual pull reads once and makes no commit',async()=>{
+ const f=fixture(),a=await activate(f.hub);assert.equal(a.records,undefined);
+ await call(f.hub,'/v1/sync',{id:a.id,device:d1,seq:1,ops:[op('f:a',song(99))]},a.token);
+ assert.deepEqual(f.counts(),{reads:1,writes:1});
+ const sql=JSON.stringify([...f.storage.map]);assert.ok(!sql.includes('salam-online://'));assert.ok(!sql.includes('"records"'));
+ const cloud=await unseal(f.env.ARCHIVE_KEY,a.id,f.libraries.get(a.id).envelope);assert.equal(cloud.records['f:a'].value.uri,song(99).uri);
+ await call(f.hub,'/v1/sync',{id:a.id,since:cloud.rev},a.token);assert.deepEqual(f.counts(),{reads:2,writes:1});
+ const before=f.counts();await call(f.hub,'/v1/username/login',{username:a.username,password});assert.deepEqual(f.counts(),before);
+});
+test('GitHub compare-and-swap retries preserve simultaneous independent device edits',async()=>{
+ const f=fixture(),a=await activate(f.hub);
+ const results=await Promise.all([d1,d2].map((device,i)=>call(f.hub,'/v1/sync',{id:a.id,device,seq:1,ops:[op('f:'+i,song(i))]},a.token)));
+ assert.ok(results.every(r=>r.status===200));
+ const cloud=await unseal(f.env.ARCHIVE_KEY,a.id,f.libraries.get(a.id).envelope);assert.equal(Object.keys(cloud.records).length,2);
+});
+test('failed GitHub write never acknowledges or stages library data in SQL',async()=>{
+ const f=fixture(),a=await activate(f.hub);f.hub.github.writeLibrary=async()=>{throw new Error('offline');};
+ assert.equal((await call(f.hub,'/v1/sync',{id:a.id,device:d1,seq:1,ops:[op('f:a',song(9))]},a.token)).status,503);
+ assert.ok(!JSON.stringify([...f.storage.map]).includes('salam-online://'));assert.equal(f.libraries.size,0);
+});
+test('legacy music is removed from SQL only after successful GitHub migration',async()=>{
+ const f=fixture(),a=await activate(f.hub);let legacy=await f.storage.get('account/'+a.id);
+ delete legacy.libraryVersion;Object.assign(legacy,merge(fresh(),{device:d1,seq:1,ops:[op('f:a',song(3))]}).account);
+ await f.storage.put('account/'+a.id,legacy);
+ const write=f.hub.github.writeLibrary;f.hub.github.writeLibrary=async()=>{throw new Error('offline');};
+ assert.equal((await admin(f,'/admin/migrate')).status,503);assert.ok((await f.storage.get('account/'+a.id)).records);
+ f.hub.github.writeLibrary=write;assert.equal((await admin(f,'/admin/migrate')).data.migrated,1);
+ assert.equal((await f.storage.get('account/'+a.id)).records,undefined);
+ assert.equal((await unseal(f.env.ARCHIVE_KEY,a.id,f.libraries.get(a.id).envelope)).records['f:a'].value.uri,song(3).uri);
+});
+test('admin requests are signed and single-use; closure revokes sessions without changing orders or music',async()=>{
+ const f=fixture(),a=await activate(f.hub);
+ await call(f.hub,'/v1/sync',{id:a.id,device:d1,seq:1,ops:[op('f:a',song(5))]},a.token);
+ const list=await admin(f,'/admin/accounts');assert.equal(list.status,200);assert.equal(list.data.accounts[0].id,a.id);
+ assert.equal((await f.hub.fetch(list.replay)).status,409);
+ assert.equal((await admin(f,'/admin/accounts',{},'x'.repeat(43))).status,401);
+ const orders=JSON.stringify(await f.storage.get('orderControl')),library=JSON.stringify([...f.libraries]);
+ assert.equal((await admin(f,'/admin/close',{id:a.id})).status,200);
+ assert.equal((await call(f.hub,'/v1/sync',{id:a.id},a.token)).status,401);
+ assert.equal((await call(f.hub,'/v1/order/login',{order:orderA,password})).status,403);
+ assert.equal(JSON.stringify(await f.storage.get('orderControl')),orders);assert.equal(JSON.stringify([...f.libraries]),library);
+ assert.equal((await admin(f,'/admin/restore',{id:a.id})).status,200);
+ assert.equal((await call(f.hub,'/v1/order/login',{order:orderA,password})).status,200);
+ assert.equal((await call(f.hub,'/v1/sync',{id:a.id},a.token)).status,401);
 });

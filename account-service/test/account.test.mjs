@@ -10,6 +10,7 @@ import {adminSignature} from '../src/admin.mjs';
 import {AccountService} from '../src/service.mjs';
 import {GitHubArchive} from '../src/github.mjs';
 import {SqliteStorage} from '../src/node-server.mjs';
+import {gzipSync,gunzipSync} from 'node:zlib';
 const orderA='ORDER_12345',orderB='ORDER_67890';
 const identityPepper=randomSecret();
 const idA=await orderId(orderA,identityPepper),idB=await orderId(orderB,identityPepper),password='A secure passphrase 123!';
@@ -45,6 +46,32 @@ async function call(hub,path,body,token=''){
  return {status:r.status,data:await r.json()};
 }
 async function activate(hub,order=orderA,pwd=password){const r=await call(hub,'/v1/order/activate',{order,password:pwd});assert.equal(r.status,200,JSON.stringify(r.data));return r.data;}
+
+test('gzip music upload and download preserve data, account checks and duplicate acknowledgement',async()=>{
+ const f=fixture(),a=await activate(f.hub),b=await activate(f.hub,orderB);
+ const data={id:a.id,device:d1,seq:1,since:0,paged:true,uploadOnly:true,
+   ops:Array.from({length:240},(_,i)=>op('f:compressed'+i,{uri:'salam-online://wy/'+i+'?title='+encodeURIComponent('合成音乐回归数据')+'&artist='+encodeURIComponent('测试歌手'),rank:i}))};
+ const plain=Buffer.from(JSON.stringify(data)),gzip=gzipSync(plain);
+ const send=token=>f.hub.fetch(new Request('https://account.example/v1/sync',{method:'POST',headers:{
+   'Content-Type':'application/json','Content-Encoding':'gzip','Accept-Encoding':'gzip',Authorization:'Bearer '+token},body:gzip}));
+ assert.ok(gzip.length<plain.length/3);
+ const denied=await send(b.token);assert.equal(denied.status,401);assert.equal(f.counts().writes,0);
+ const first=await send(a.token);assert.equal(first.status,200);assert.equal(first.headers.get('content-encoding'),'gzip');
+ const result=JSON.parse(gunzipSync(Buffer.from(await first.arrayBuffer())));assert.equal(Object.keys(result.records).length,240);
+ assert.equal(result.records['f:compressed239'].value.uri,data.ops[239].value.uri);
+ const count=f.counts().writes,retry=await send(a.token);assert.equal(retry.status,200);await retry.arrayBuffer();assert.equal(f.counts().writes,count);
+ const legacy=await call(f.hub,'/v1/sync',{id:a.id,since:0,paged:true},a.token);assert.equal(legacy.status,200);assert.equal(Object.keys(legacy.data.records).length,240);
+ console.log('Synthetic music wire bytes: '+plain.length+' -> '+gzip.length);
+});
+
+test('gzip decoder rejects malformed streams, unsupported encoding and inflated payload overflow',async()=>{
+ const {hub}=fixture();
+ for(const [encoding,body,status]of [['gzip',Buffer.from('not-gzip'),400],['br',Buffer.from('{}'),415],
+   ['gzip',gzipSync(Buffer.from(JSON.stringify({text:'x'.repeat(1000001)}))),413]]){
+   const response=await hub.fetch(new Request('https://account.example/v1/sync',{method:'POST',headers:{'Content-Encoding':encoding},body}));
+   assert.equal(response.status,status);assert.ok((await response.json()).error);
+ }
+});
 
 test('same normalized order gets stable ID and matches existing PBKDF2 format',async()=>{
  assert.equal(normalizeOrder(' order_ 12345\n'),orderA);assert.equal(await orderId(' order_ 12345\n',identityPepper),idA);assert.notEqual(idA,idB);assert.notEqual(await orderId(orderA,randomSecret()),idA);

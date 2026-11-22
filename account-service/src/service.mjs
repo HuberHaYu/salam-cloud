@@ -1,4 +1,5 @@
 import {LibraryStore} from './library.mjs';
+import {BodyError,readJsonBody,compressSyncResponse} from './http-body.mjs';
 import {ID, SECRET, digest, equal, randomSecret, merge, seal, unseal} from './core.mjs';
 import {hashPassword, verifyPassword, validatePassword} from './password.mjs';
 import {normalizeOrder, orderId, orderHash, username, usernameKey, randomUsername} from './order.mjs';
@@ -15,22 +16,15 @@ export class AccountService {
   async fetch(request){
     if(this.activeRequests>=64)return json({error:'服务繁忙，请稍后重试'},503);
     this.activeRequests++;
-    try{return await this.handle(request);}finally{this.activeRequests--;}
+    try{return await compressSyncResponse(request,await this.handle(request));}finally{this.activeRequests--;}
   }
   async handle(request){
     const path=new URL(request.url).pathname;
-    if(path==='/health')return json({service:'salam-id',version:4});
+    if(path==='/health')return json({service:'salam-id',version:5});
     if(!configured(this.env))return json({error:'账号服务暂未配置完成'},503);
     if(request.method!=='POST')return json({error:'仅支持 POST'},405);
     try{
-      if(Number(request.headers.get('content-length')||0)>1000000)return json({error:'同步数据过大'},413);
-      const reader=request.body?.getReader();if(!reader)return json({error:'请求为空'},400);
-      const chunks=[];let size=0;
-      for(;;){const {value,done}=await reader.read();if(done)break;size+=value.length;
-        if(size>1000000){await reader.cancel();return json({error:'同步数据过大'},413);}chunks.push(value);}
-      const bytes=new Uint8Array(size);let offset=0;for(const part of chunks){bytes.set(part,offset);offset+=part.length;part.fill(0);}
-      let body;try{body=JSON.parse(new TextDecoder().decode(bytes));}catch{return json({error:'请求格式不正确'},400);}finally{bytes.fill(0);}
-      if(!body||typeof body!=='object'||Array.isArray(body))return json({error:'请求格式不正确'},400);
+      const body=await readJsonBody(request);
       // Music uses GitHub file-SHA concurrency; network waits never hold the account DB lock.
       if(path==='/v1/sync')return await this.route(path,body,request);
       if(path.startsWith('/admin/')){
@@ -39,7 +33,8 @@ export class AccountService {
         return result?.deleteId?await this.finishDeletion(result.deleteId):result;
       }
       return await this.serial(()=>this.route(path,body,request));
-    }catch(e){return json({error:e.status===429?'尝试较多，请稍后重试':'请求未完成，请稍后重试'},e.status===429?429:503);}
+    }catch(e){if(e instanceof BodyError)return json({error:e.message},e.status);
+      return json({error:e.status===429?'尝试较多，请稍后重试':'请求未完成，请稍后重试'},e.status===429?429:503);}
   }
   async limit(name,max,windowMs){
     const key='limit/'+name,now=Date.now(),old=await this.ctx.storage.get(key);

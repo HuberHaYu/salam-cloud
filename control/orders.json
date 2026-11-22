@@ -1,20 +1,22 @@
 {
-  "$comment": "订单号只存加盐 PBKDF2-SHA256 哈希（由 SalamCloud 在本地计算）。revoked 中的哈希即使已验证过也会失效。不要改 salt/iterations，否则已有哈希全部失效。",
-  "kdf": {
-    "algorithm": "PBKDF2-HMAC-SHA256",
-    "iterations": 100000,
-    "length": 32,
-    "normalize": "去掉所有空白字符后转大写",
-    "salt": "4f45a32f4ea9d9b37a54dd426b3e1640"
+  "$comment" : "订单号只存加盐 PBKDF2-SHA256 哈希（由 SalamCloud 在本地计算）。revoked 中的哈希即使已验证过也会失效。不要改 salt/iterations，否则已有哈希全部失效。",
+  "kdf" : {
+    "algorithm" : "PBKDF2-HMAC-SHA256",
+    "iterations" : 100000,
+    "length" : 32,
+    "normalize" : "去掉所有空白字符后转大写",
+    "salt" : "4f45a32f4ea9d9b37a54dd426b3e1640"
   },
-  "manual_orders": [
+  "manual_orders" : [
     "3b01980db57b9024f16c8119c9d794f24b03acde1f1aaed8cfa681a2cfbc7fa1",
     "783b14e6cae8cc84da1e18c3abf7028356b1833cc36cf60c7f1e6b173d4f1102",
     "87457d28758bf1f7672b129198a661a47f02c00ad31a83ea309e04347e669976",
     "a0e1c2877e238c8ebd48ee61bcc6258f3f056376f4334e0543ed8d844cd83031"
   ],
-  "manual_revoked": [],
-  "orders": [
+  "manual_revoked" : [
+
+  ],
+  "orders" : [
     "0066c346787f94e5bf612a01470c9695324dbb45f3c864c7d94db310126f94a6",
     "00f181d96b59d0b5f0a036530f110985600183a88117e09addac0fc5551b74c5",
     "01fa4c8ed7d9f28801fec1360c49ba1f9bac69a8e444593a226be44ff64e7b10",
@@ -174,6 +176,7 @@
     "39ae646d139aee9caee00b849ab92be1ac492b7ab93f77e4455ac6870539a698",
     "39d56e2ccd363d287e8bd7d3f6cdeac903be5b99927971aa24213083eaa9d111",
     "3a3ab826eab7067e429d029502c688c4edda097f86453a67ff762e65cfab9e10",
+    "3b01980db57b9024f16c8119c9d794f24b03acde1f1aaed8cfa681a2cfbc7fa1",
     "3bb3770df59474301264d86a284dd457380c3eb1d2a24558eb8f1ddc0434dcf4",
     "3bc9b440d64ccfd66e206045826998b63f28c2f7b4bfd408ba482fa8360af295",
     "3c2f67e5fc441c93023e2ccaf5ee1f1096569b24d5fd76c84f3bc430853948a6",
@@ -389,6 +392,7 @@
     "8683b4e377d3100b654468e4301aed49880b65c9fb60918fcc6c4984e581caf6",
     "86eaf506fbd4540449faceb96fe55332e18f9bf85834e5cd2fc0868a82507665",
     "8728986e95c03423b475aea6adcd4f4388488b18d64feddc373c8deca5700756",
+    "87457d28758bf1f7672b129198a661a47f02c00ad31a83ea309e04347e669976",
     "8766f542a2d6580976019da23c6e124a9b54d29277e3cf27ba2cee06e6eb0147",
     "877e4a433182f95809aaf71ece7324df3ff1b622d975aa3ad1b0c2c3efaf6b7e",
     "87b00cfbc3096a48130f2466c0dd24689601cc60811b8258a3628004e8b86cb5",
@@ -747,11 +751,9 @@
     "fd66fe313eb6a2a2544ae46542fbab178aa9c5aeb5597ef7d3d3809e244088a2",
     "fdca071f2debe557c37b745fa0f0c6ea856db2e954082841be37e987ea7582cc",
     "fe674b432391326890a69ef6099efc20141e16ef42c762492845cc48ef3925ab",
-    "ff4cfdea2abea381cd9a5f90d84db8520fb29589fe05338fab3e1fa60009373e",
-    "3b01980db57b9024f16c8119c9d794f24b03acde1f1aaed8cfa681a2cfbc7fa1",
-    "87457d28758bf1f7672b129198a661a47f02c00ad31a83ea309e04347e669976"
+    "ff4cfdea2abea381cd9a5f90d84db8520fb29589fe05338fab3e1fa60009373e"
   ],
-  "revoked": [
+  "revoked" : [
     "01c10c95a42ceb4f81223ac1eb45ee35564e6894cdfa6381e3775b13f0bd8efb",
     "04a93486949b41cec9102a6147c6a86aab0eceb17d443f0f41ccd4c4e51803fb",
     "3bc58f377da5c20baec1f76a3944d6ff7260574de37fc7a657e0a85023ade462",

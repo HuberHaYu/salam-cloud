@@ -1,3 +1,4 @@
+import {blobSha} from '../src/library.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {pbkdf2Sync,generateKeyPairSync,sign} from 'node:crypto';
@@ -27,10 +28,17 @@ class Storage {
 }
 function fixture(){
  const storage=new Storage(),env={AUTH_PEPPER:identityPepper,PASSWORD_PEPPER:randomSecret(),ARCHIVE_KEY:randomSecret(),REGISTRATION_ENABLED:'true',GITHUB_TOKEN:'test-only-owner-token'};
- const hub=new AccountService({storage},env),commits=[],libraries=new Map();let controlReads=0,libraryReads=0,libraryWrites=0;
+ const hub=new AccountService({storage},env),commits=[],libraries=new Map(),blobs=new Map(),parts=new Map();let controlReads=0,libraryReads=0,libraryWrites=0;
  hub.github={read:async()=>null,readLibrary:async id=>{libraryReads++;return structuredClone(libraries.get(id)||null);},
- writeLibrary:async(id,envelope,sha)=>{if(libraries.get(id)?.sha!==sha){const e=new Error('CAS conflict');e.status=409;throw e;}libraryWrites++;const next=String(libraryWrites);libraries.set(id,{sha:next,envelope:structuredClone(envelope)});return next;},commit:async f=>{commits.push(structuredClone(f));for(const file of f)if(file.remove)libraries.delete(file.path.split('/').at(-1).replace(/\.json$/,''));},control:async()=>{controlReads++;return {serial:1,order_gate:{kdf,orders:hashes,revoked:[]}};}};
- return {hub,storage,env,commits,libraries,counts:()=>({reads:libraryReads,writes:libraryWrites}),controlReads:()=>controlReads};
+ writeLibrary:async(id,envelope,sha)=>{const next=await blobSha(JSON.stringify(envelope));if(libraries.get(id)?.sha!==sha){const e=new Error('CAS conflict');e.status=409;throw e;}libraryWrites++;blobs.set(next,structuredClone(envelope));libraries.set(id,{sha:next,envelope:structuredClone(envelope)});return next;},readLibraryBlob:async sha=>structuredClone(blobs.get(sha)),
+ writeLibraryParts:async(id,files,sha)=>{
+  const prepared=await Promise.all(files.map(async f=>f.remove?f:{...f,hash:await blobSha(f.content),envelope:JSON.parse(f.content)}));
+  if(libraries.get(id)?.sha!==sha){const e=new Error('CAS conflict');e.status=409;throw e;}
+  for(const f of prepared){if(f.remove){parts.delete(f.path);continue;}blobs.set(f.hash,f.envelope);parts.set(f.path,f.hash);
+   if(f.path==='accounts/library/v1/'+id+'.json')libraries.set(id,{sha:f.hash,envelope:f.envelope});}
+  libraryWrites++;
+ },commit:async f=>{commits.push(structuredClone(f));for(const file of f)if(file.remove){parts.delete(file.path);if(file.path.startsWith('accounts/library/v1/'))libraries.delete(file.path.split('/').at(-1).replace(/\.json$/,''));}},control:async()=>{controlReads++;return {serial:1,order_gate:{kdf,orders:hashes,revoked:[]}};}};
+ return {hub,storage,env,commits,libraries,blobs,parts,counts:()=>({reads:libraryReads,writes:libraryWrites}),controlReads:()=>controlReads};
 }
 async function call(hub,path,body,token=''){
  const r=await hub.fetch(new Request('https://account.example'+path,{method:'POST',headers:{'Content-Type':'application/json','CF-Connecting-IP':'192.0.2.1',Authorization:'Bearer '+token},body:JSON.stringify(body)}));
@@ -285,4 +293,51 @@ test('in-flight account backup cannot resurrect a subsequently deleted account',
  assert.equal((await deletion).status,200);await f.hub.alarm();
  const latest=f.commits.flat().filter(x=>x.id===a.id).at(-1);assert.ok((await unseal(f.env.ARCHIVE_KEY,a.id,latest.envelope)).deletedAt);
  assert.equal((await f.storage.get('directory')).users[usernameKey(a.username)],undefined);
+});
+
+test('large real-shaped playlist uploads, retries, paged pulls and accounts remain isolated',async()=>{
+ const f=fixture(),a=await activate(f.hub),other=await activate(f.hub,orderB);
+ const make=(i)=>({uri:'salam-online://wy/'+i+'?n='+encodeURIComponent('曲目 '+i)+'&c=https://images.example/'+('cover-'+i).repeat(70),playlist:'list-a',rank:i});
+ let seq=0,rev=0;
+ for(let start=0;start<3500;start+=250){
+  const ops=Array.from({length:250},(_,j)=>op('t:list-a:online:wy:'+(start+j),make(start+j),0));
+  if(!start)ops.unshift(op('p:list-a',{name:'My playlist',rank:0}));
+  const request={id:a.id,device:d1,seq:++seq,since:0,uploadOnly:true,paged:true,ops};
+  const r=await call(f.hub,'/v1/sync',request,a.token);assert.equal(r.status,200,JSON.stringify(r.data));rev=r.data.rev;
+  const writes=f.counts().writes;
+  const retry=await call(f.hub,'/v1/sync',request,a.token);assert.equal(retry.status,200);assert.equal(f.counts().writes,writes);
+ }
+ const stored=await unseal(f.env.ARCHIVE_KEY,a.id,f.libraries.get(a.id).envelope);
+ assert.equal(stored.storage,2);assert.ok(stored.shards.length>1);
+ let response=await call(f.hub,'/v1/sync',{id:a.id,since:0,paged:true},a.token),all={...response.data.records};
+ const snapshot=response.data.snapshot;assert.ok(snapshot);
+ // Another device edits during download: subsequent pages must stay on the first immutable snapshot.
+ const edit=await call(f.hub,'/v1/sync',{id:a.id,device:d2,seq:1,since:rev,uploadOnly:true,ops:[op('p:list-a',{name:'Updated',rank:0},rev)]},a.token);assert.equal(edit.status,200);
+ while(response.data.nextPage!==undefined){
+  response=await call(f.hub,'/v1/sync',{id:a.id,since:0,paged:true,snapshot,page:response.data.nextPage},a.token);
+  assert.equal(response.status,200);assert.equal(response.data.rev,rev);Object.assign(all,response.data.records);
+ }
+ assert.equal(Object.keys(all).length,3501);assert.equal(all['p:list-a'].value.name,'My playlist');
+ const second=await call(f.hub,'/v1/sync',{id:other.id,device:d1,seq:1,since:0,ops:[op('p:list-a',{name:'Other account'})]},other.token);assert.equal(second.status,200);
+ assert.equal((await call(f.hub,'/v1/sync',{id:other.id,since:0},a.token)).status,401);
+ const foreign=await call(f.hub,'/v1/sync',{id:other.id,since:0,paged:true,snapshot,page:1},other.token);
+ assert.notEqual(foreign.status,200);assert.equal(foreign.data.records,undefined);
+ const restored=await call(f.hub,'/v1/sync',{id:a.id,since:0,paged:true},a.token);assert.equal(restored.status,200);
+ const unchanged=await call(f.hub,'/v1/sync',{id:a.id,since:edit.data.rev,paged:true},a.token);assert.deepEqual(unchanged.data.records,{});
+ const close=await admin(f,'/admin/close',{id:a.id});assert.equal(close.status,200);
+ const closed=(await f.storage.get('account/'+a.id)).closedAt;
+ const removed=await admin(f,'/admin/delete',{id:a.id,confirmId:a.id,closedAt:closed});assert.equal(removed.status,200);
+ assert.ok(![...f.parts.keys()].some(path=>path.includes(a.id)));assert.ok(f.libraries.has(other.id));
+ assert.equal((await call(f.hub,'/v1/sync',{id:other.id,since:0},other.token)).data.records['p:list-a'].value.name,'Other account');
+
+});
+
+test('state drift returns recoverable machine codes instead of mislabelled content errors',async()=>{
+ const f=fixture(),a=await activate(f.hub);
+ const gap=await call(f.hub,'/v1/sync',{id:a.id,device:d1,seq:5,since:0,ops:[op('f:a',song(1))]},a.token);
+ assert.equal(gap.data.code,'SYNC_SEQUENCE');assert.equal(gap.data.deviceSeq,0);
+ const reset=await call(f.hub,'/v1/sync',{id:a.id,device:d1,seq:1,since:99,ops:[op('f:a',song(1),99)]},a.token);
+ assert.equal(reset.data.code,'SYNC_REBASE');assert.equal(reset.data.revision,0);
+ const bad=await call(f.hub,'/v1/sync',{id:a.id,device:d1,seq:1,since:0,ops:[op('f:a',{uri:'file:///x',rank:0})]},a.token);
+ assert.equal(bad.status,422);assert.equal(bad.data.code,'SYNC_DATA');assert.match(bad.data.error,/在线音乐/);
 });

@@ -20,9 +20,9 @@ export class GitHubArchive {
     this.cached={value:result.token,until:Date.parse(result.expires_at)-120000};
     return result.token;
   }
-  async send(path,method='GET',body,token) {
+  async send(path,method='GET',body,token,accept='application/vnd.github+json') {
     const response=await fetch('https://api.github.com'+path, {method,redirect:'error',signal:AbortSignal.timeout(20000),
-      headers:{Authorization:'Bearer '+(token||await this.token()),Accept:'application/vnd.github+json','X-GitHub-Api-Version':'2022-11-28','User-Agent':'Salam-ID','Content-Type':'application/json'},
+      headers:{Authorization:'Bearer '+(token||await this.token()),Accept:accept,'X-GitHub-Api-Version':'2022-11-28','User-Agent':'Salam-ID','Content-Type':'application/json'},
       body:body===undefined?undefined:JSON.stringify(body)});
     if(!response.ok) { const error=new Error('GitHub '+response.status);error.status=response.status;
       error.retryAt=Date.now()+Math.max(60000,Number(response.headers.get('retry-after')||0)*1000);
@@ -42,10 +42,28 @@ export class GitHubArchive {
   // Contents API reads the current file and its compare-and-swap SHA in one request.
   async readLibrary(id) {
     try {
-      const f=await this.send(this.root+'/contents/accounts/library/v1/'+id+'.json?ref='+encodeURIComponent(this.env.GITHUB_BRANCH||'main'));
-      if(f.encoding!=='base64'||f.size>1500000||!f.sha)throw new Error('Invalid music file');
-      return {sha:f.sha,envelope:JSON.parse(new TextDecoder().decode(unb64(f.content.replace(/\s/g,''))))};
+      const f=await this.send(this.root+'/contents/accounts/library/v1/'+id+'.json?ref='+encodeURIComponent(this.env.GITHUB_BRANCH||'main'),'GET',undefined,undefined,'application/vnd.github.object+json');
+      if(!f.sha)throw new Error('Invalid music file');
+      return {sha:f.sha,envelope:f.encoding==='base64'?JSON.parse(new TextDecoder().decode(unb64(f.content.replace(/\s/g,'')))):await this.readLibraryBlob(f.sha)};
     }catch(e){if(e.status===404)return null;throw e;}
+  }
+  async readLibraryBlob(sha) {
+    if(!/^[a-f0-9]{40}$/.test(sha))throw new Error('Invalid blob identity');
+    const f=await this.send(this.root+'/git/blobs/'+sha);
+    if(f.encoding!=='base64'||f.size>16000000)throw new Error('Invalid library blob');
+    return JSON.parse(new TextDecoder().decode(unb64(f.content.replace(/\s/g,''))));
+  }
+  async writeLibraryParts(id,files,expectedSha) {
+    const branch=encodeURIComponent(this.env.GITHUB_BRANCH||'main');
+    const ref=await this.send(this.root+'/git/ref/heads/'+branch),head=ref.object.sha;
+    const parent=await this.send(this.root+'/git/commits/'+head);
+    let current;try{current=await this.send(this.root+'/contents/accounts/library/v1/'+id+'.json?ref='+head,'GET',undefined,undefined,'application/vnd.github.object+json');}
+    catch(e){if(e.status!==404)throw e;}
+    if(current?.sha!==expectedSha){const e=new Error('Library changed');e.status=409;throw e;}
+    const tree=await this.send(this.root+'/git/trees','POST',{base_tree:parent.tree.sha,
+      tree:files.map(f=>({path:f.path,mode:'100644',type:'blob',...(f.remove?{sha:null}:{content:f.content})}))});
+    const commit=await this.send(this.root+'/git/commits','POST',{message:'Salam ID library sync',tree:tree.sha,parents:[head]});
+    await this.send(this.root+'/git/refs/heads/'+branch,'PATCH',{sha:commit.sha,force:false});
   }
   async writeLibrary(id,envelope,sha) {
     const bytes=new TextEncoder().encode(JSON.stringify(envelope));let raw='';

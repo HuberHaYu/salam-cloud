@@ -1,3 +1,4 @@
+import {LibraryStore} from './library.mjs';
 import {ID, SECRET, digest, equal, randomSecret, merge, seal, unseal} from './core.mjs';
 import {hashPassword, verifyPassword, validatePassword} from './password.mjs';
 import {normalizeOrder, orderId, orderHash, username, usernameKey, randomUsername} from './order.mjs';
@@ -18,7 +19,7 @@ export class AccountService {
   }
   async handle(request){
     const path=new URL(request.url).pathname;
-    if(path==='/health')return json({service:'salam-id',version:3});
+    if(path==='/health')return json({service:'salam-id',version:4});
     if(!configured(this.env))return json({error:'账号服务暂未配置完成'},503);
     if(request.method!=='POST')return json({error:'仅支持 POST'},405);
     try{
@@ -181,26 +182,27 @@ export class AccountService {
     return json({error:'接口不存在'},404);
   }
   async syncLibrary(auth,b) {
-    // Legacy accounts are migrated once. Never remove their durable copy before GitHub acknowledges it.
     if(!auth.libraryVersion)await this.serial(async()=>{const current=await this.load(auth.id);if(current&&!current.libraryVersion)await this.migrateLibrary(current);});
+    if(b.snapshot&&(!/^[a-f0-9]{40}$/.test(b.snapshot)||b.ops?.length))return json({error:'同步已中断，请重试'},400);
     for(let attempt=0;attempt<3;attempt++) {
-      const file=await this.github.readLibrary(auth.id);
-      let music=file?await unseal(this.env.ARCHIVE_KEY,auth.id,file.envelope):{id:auth.id,rev:0,generation:0,records:{},devices:{}};
+      const library=await new LibraryStore(this.github,this.env,auth.id).open(b.snapshot);
+      if(Number.isSafeInteger(b.since)&&b.since>library.index.rev)return json({error:'正在重新连接同步，请稍后重试',code:'SYNC_REBASE',revision:library.index.rev,deviceSeq:library.index.devices[b.device]||0},409);
       let conflicts=[];
       if(b.ops?.length) {
-        let merged;try{merged=merge(music,b);}catch{return json({error:'同步内容或版本无效，请保留本机数据后重试'},409);}
-        music=merged.account;conflicts=merged.conflicts;
+        const music=await library.writable(b.ops);let merged;
+        try{merged=merge(music,b);}catch(e){return json({error:e.message,code:e.code||'SYNC_DATA',
+          ...(e.code?{revision:music.rev,deviceSeq:music.devices[b.device]||0}:{})},e.code?409:422);}
+        conflicts=merged.conflicts;
         if(!merged.duplicate) {
-          // Recheck revocation immediately before committing. Do not persist any library payload in SQL.
           const latest=await this.load(auth.id);
           if(!latest||latest.closedAt||latest.deletingAt||latest.deletedAt||latest.authVersion!==auth.authVersion)return json({error:'账号状态已变化，请重新登录'},401);
-          try{await this.github.writeLibrary(auth.id,await seal(this.env.ARCHIVE_KEY,auth.id,music),file?.sha);}
+          try{await library.save(merged.account);}
           catch(e){if([409,422].includes(e.status)&&attempt<2)continue;throw e;}
         }
       }
-      return this.syncResponse({...music,username:auth.username,committedRev:music.rev},b,{conflicts});
+      return json({...await library.page(b),username:auth.username,conflicts});
     }
-    return json({error:'其他设备正在同步，请稍后手动重试'},409);
+    return json({error:'其他设备正在同步，请稍后重试'},409);
   }
   async migrateLibrary(a) {
     if(a.libraryVersion)return;
@@ -266,7 +268,10 @@ export class AccountService {
       const marker={id,deletedAt:a.deletingAt};
       const files=[{id,envelope:await seal(this.env.ARCHIVE_KEY,id,marker)},
         {id:'directory',envelope:await seal(this.env.ARCHIVE_KEY,'directory',directory)}];
-      if(await this.github.readLibrary(id))files.push({path:'accounts/library/v1/'+id+'.json',remove:true});
+      if(await this.github.readLibrary(id)){
+        const library=await new LibraryStore(this.github,this.env,id).open();
+        files.push(...library.deletionPaths().map(path=>({path,remove:true})),{path:'accounts/library/v1/'+id+'.json',remove:true});
+      }
       await this.github.commit(files);
       await this.ctx.storage.transaction(async tx=>{
         await tx.put('deleted/'+id,marker);await tx.put('directory',directory);

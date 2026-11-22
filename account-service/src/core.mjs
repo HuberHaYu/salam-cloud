@@ -1,8 +1,8 @@
 const enc = new TextEncoder();
 export const ID = /^SL-[A-F0-9]{32}$/;
 export const SECRET = /^[A-Za-z0-9_-]{43}$/;
-export const MAX_RECORDS = 6000;
-export const MAX_BYTES = 750000;
+
+
 export function b64(bytes) { return btoa(String.fromCharCode(...bytes)).replaceAll('+', '-').replaceAll('/', '_').replace(/=+$/, ''); }
 export function unb64(s) { return Uint8Array.from(atob(s.replaceAll('-', '+').replaceAll('_', '/')), c => c.charCodeAt(0)); }
 export function randomSecret() { return b64(crypto.getRandomValues(new Uint8Array(32))); }
@@ -21,6 +21,7 @@ export function nickname(value) {
   if (!n || [...n].length > 30 || /[\x00-\x1f\x7f]/.test(n)) throw new Error('昵称需为 1～30 个字符');
   return n;
 }
+export class SyncError extends Error { constructor(code,message){super(message);this.code=code;} }
 export function validRecord(key, value) {
   if (!/^[fcpt]:.{1,240}$/.test(key) || key.includes('\n')) throw new Error('数据标识无效');
   if (value === null) return;
@@ -40,22 +41,22 @@ export function merge(account, body) {
   if (!/^[a-f0-9-]{36}$/.test(body.device || '') || !Number.isSafeInteger(body.seq) || body.seq < 1 || !Array.isArray(body.ops) || body.ops.length > 500) throw new Error('同步请求无效');
   const previous = account.devices[body.device] || 0;
   if (body.seq <= previous) return {account, conflicts: [], duplicate: true};
-  if (body.seq !== previous + 1) throw new Error('设备同步序号不连续');
+  if (body.seq !== previous + 1) throw new SyncError('SYNC_SEQUENCE','正在重新连接同步，请稍后重试');
   if (!previous && Object.keys(account.devices).length >= 32) throw new Error('账号设备数量已达上限');
   const next = structuredClone(account), conflicts = [];
   const unique = new Set();
   for (const op of body.ops) {
     validRecord(op.key, op.value);
-    if (unique.has(op.key) || !Number.isSafeInteger(op.base) || op.base < 0 || op.base > account.rev) throw new Error('同步版本无效');
+    if (unique.has(op.key) || !Number.isSafeInteger(op.base) || op.base < 0) throw new Error('上传内容无法识别，请更新应用后重试');
+    if(op.base > account.rev)throw new SyncError('SYNC_REBASE','正在重新连接同步，请稍后重试');
     unique.add(op.key);
     const current = next.records[op.key];
-    if (current && current.rev > op.base) { conflicts.push(op.key); continue; }
     if (JSON.stringify(current?.value ?? null) === JSON.stringify(op.value)) continue;
+    if (current && current.rev > op.base) { conflicts.push(op.key); continue; }
     next.records[op.key] = {value: op.value, rev: ++next.rev};
   }
   next.devices[body.device] = body.seq;
   next.generation++;
-  if (Object.keys(next.records).length > MAX_RECORDS || enc.encode(JSON.stringify(next)).length > MAX_BYTES) throw new Error('账号音乐数据已达到当前容量上限');
   return {account:next, conflicts, duplicate:false};
 }
 /** Random nonce + account-bound AAD; public repository contains ciphertext only. */
@@ -74,7 +75,7 @@ export async function unseal(keyText, id, envelope) {
   const key = await crypto.subtle.importKey('raw', unb64(keyText), 'AES-GCM', false, ['decrypt']);
   const compressed = await crypto.subtle.decrypt({name:'AES-GCM', iv:unb64(envelope.iv), additionalData:enc.encode('salam-id-v1:'+id)}, key, unb64(envelope.data));
   const raw = await new Response(new Blob([compressed]).stream().pipeThrough(new DecompressionStream('gzip'))).text();
-  if (raw.length > MAX_BYTES * 2) throw new Error('归档过大');
+  if (raw.length > 32000000) throw new Error('单个归档分片过大');
   const data = JSON.parse(raw);
   if (data.id !== id) throw new Error('归档账号不匹配');
   return data;

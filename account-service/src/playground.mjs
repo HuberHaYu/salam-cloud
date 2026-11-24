@@ -55,7 +55,38 @@ export class Playground {
    return {status:200,data:{url:j.url,key:j.key,jobId:j.id}};
   }
   if(path==='/v1/playground/cancel')return {status:200,data:await this.locked(async()=>{const q=await this.state(),j=q.jobs.find(j=>j.id===b.jobId&&j.owner===b.id);if(!j||!['queued','uploading'].includes(j.status))return {error:'只能取消尚未开始的任务'};j.status='cancelled';j.stage='已取消';await this.save(q);return {ok:true};})};
+  if(path==='/v1/playground/delete'){
+   if(!UUID.test(b.jobId||''))return {status:400,data:{error:'作品标识无效'}};
+   const target=await this.locked(async()=>{
+    const q=await this.state(),j=q.jobs.find(x=>x.id===b.jobId&&x.owner===b.id);
+    if(!j)return {status:404,data:{error:'作品不存在或无权删除'}};
+    if(['uploading','running','publishing'].includes(j.status))return {status:409,data:{error:'任务进行中，请稍后再删除'}};
+    j.status='deleting';j.stage='删除中';await this.save(q);return {ok:true};
+   });
+   if(target.status)return target;
+   await this.deleteArtifacts(b.jobId);
+   await this.locked(async()=>{
+    const q=await this.state();
+    q.jobs=q.jobs.filter(x=>!(x.id===b.jobId&&x.owner===b.id));
+    await this.save(q);
+   });
+   return {status:200,data:{ok:true,jobId:b.jobId}};
+  }
   return {status:404,data:{error:'接口不存在'}};
+ }
+ async deleteArtifacts(id){
+  const tag='smart-'+id;
+  try{
+   const release=await this.g.send(this.g.root+'/releases/tags/'+encodeURIComponent(tag));
+   if(release?.id){
+    try{await this.g.send(this.g.root+'/releases/'+release.id,'DELETE');}
+    catch(e){if(e.status!==404)throw e;}
+   }
+  }catch(e){if(e.status!==404)throw e;}
+  try{await this.g.send(this.g.root+'/git/refs/tags/'+encodeURIComponent(tag),'DELETE');}
+  catch(e){if(e.status!==404&&e.status!==422)throw e;}
+  try{await this.g.commit([{path:'playground/requests/'+id+'.json',remove:true}]);}
+  catch(e){if(e.status!==404&&e.status!==422)throw e;}
  }
  async worker(b){
   const result=await this.locked(async()=>{

@@ -90,4 +90,24 @@ export class GitHubArchive {
     // Non-fast-forward is deliberately rejected. A later alarm rebuilds on the latest branch.
     await this.send(this.root+'/git/refs/heads/'+branch,'PATCH',{sha:commit.sha,force:false});
   }
+  async uploadReleaseAsset(tag,name,bytes) {
+    let release;
+    try { release=await this.send(this.root+'/releases/tags/'+encodeURIComponent(tag)); }
+    catch(e) {
+      if(e.status!==404) throw e;
+      release=await this.send(this.root+'/releases','POST',{tag_name:tag,name:tag,body:'Encrypted Salam Smart Music artifact',draft:false,prerelease:true});
+    }
+    const existing=(release.assets||[]).find(a=>a.name===name);
+    if(existing?.browser_download_url) return existing.browser_download_url;
+    const uploadBase=String(release.upload_url||'').split('{')[0];
+    if(!uploadBase) throw new Error('Release upload URL unavailable');
+    const response=await fetch(uploadBase+'?name='+encodeURIComponent(name),{
+      method:'POST',redirect:'error',signal:AbortSignal.timeout(30000),
+      headers:{Authorization:'Bearer '+await this.token(),Accept:'application/vnd.github+json','X-GitHub-Api-Version':'2022-11-28','User-Agent':'Salam-ID','Content-Type':'application/octet-stream'},
+      body:bytes
+    });
+    if(!response.ok){const error=new Error('GitHub '+response.status);error.status=response.status;throw error;}
+    const asset=await response.json();
+    return asset.browser_download_url;
+  }
 }

@@ -1,12 +1,57 @@
-import {ID, SECRET, digest, equal, seal, unseal, randomSecret} from './core.mjs';
+import {ID, SECRET, digest, equal, seal, unseal, randomSecret, unb64} from './core.mjs';
 const UUID=/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const active=j=>['uploading','queued','running','publishing'].includes(j.status);
+const REF_MODES=['none','continue','remix'];
+const REF_EXTS=['ogg','mp3','wav','flac','m4a'];
+const MAX_REF_BYTES=750000;
+function decodeStdB64(input){
+  const raw=atob(String(input||'').replace(/\s+/g,''));
+  const out=new Uint8Array(raw.length);
+  for(let i=0;i<raw.length;i++)out[i]=raw.charCodeAt(i);
+  return out;
+}
+async function encryptRefAudio(keyB64Url,jobId,plainBytes){
+  const key=await crypto.subtle.importKey('raw',unb64(keyB64Url),'AES-GCM',false,['encrypt']);
+  const iv=crypto.getRandomValues(new Uint8Array(12));
+  const aad=new TextEncoder().encode(jobId+':ref');
+  const ct=new Uint8Array(await crypto.subtle.encrypt({name:'AES-GCM',iv,additionalData:aad},key,plainBytes));
+  const out=new Uint8Array(12+ct.length);
+  out.set(iv,0);out.set(ct,12);
+  return out;
+}
 export function validateGeneration(b){
-  if(typeof b.style!=='string'||!b.style.trim()||b.style.length>6000)throw new Error('请填写音乐描述（最多 6000 字）');
+  const refMode=b.reference_mode===undefined?'none':b.reference_mode;
+  if(!REF_MODES.includes(refMode))throw new Error('参考模式无效');
+  const rawStyle=typeof b.style==='string'?b.style.trim():'';
+  if((refMode!=='continue'&&!rawStyle)||rawStyle.length>6000)throw new Error('请填写音乐描述（最多 6000 字）');
+  const style=rawStyle||'continue smoothly in the same style and timbre';
   if(typeof b.lyrics!=='string'||b.lyrics.length>12000)throw new Error('歌词最多 12000 字');
   if(!['song','instrumental'].includes(b.music_mode)||![30,60,120,180].includes(b.duration_seconds))throw new Error('生成选项无效');
   if(b.music_mode==='song'&&!b.lyrics.trim())throw new Error('请填写歌词');
-  return {style:b.style.trim(),lyrics:b.music_mode==='song'?b.lyrics:'',music_mode:b.music_mode,duration_seconds:b.duration_seconds,count:1,cot:'full',ending_mode:'fade',kv_ram:false};
+  const out={style,lyrics:b.music_mode==='song'?b.lyrics:'',music_mode:b.music_mode,duration_seconds:b.duration_seconds,count:1,cot:'full',ending_mode:'fade',kv_ram:false};
+  if(refMode!=='none'){
+    out.reference_mode=refMode;
+    if(refMode==='remix'){
+      const strength=b.remix_strength===undefined?0.65:Number(b.remix_strength);
+      if(!Number.isFinite(strength)||strength<0.1||strength>1.0)throw new Error('Remix 力度无效');
+      out.remix_strength=Math.round(strength*100)/100;
+      out.keep_melody=b.keep_melody===undefined?true:Boolean(b.keep_melody);
+    }
+    if(b.source_job_id){
+      if(!UUID.test(String(b.source_job_id)))throw new Error('参考作品标识无效');
+      out.source_job_id=String(b.source_job_id);
+    }else if(typeof b.reference_audio_b64==='string'&&b.reference_audio_b64.trim()){
+      const ext=String(b.reference_audio_ext||'ogg').toLowerCase();
+      if(!REF_EXTS.includes(ext))throw new Error('参考音频格式不支持');
+      out.ref_ext=ext;
+    }else{
+      throw new Error('请先选择或播放要引用的歌曲');
+    }
+    if(typeof b.reference_title==='string'&&b.reference_title.trim()){
+      out.reference_title=b.reference_title.trim().slice(0,120);
+    }
+  }
+  return out;
 }
 export class Playground {
  constructor(storage,env,github){this.s=storage;this.e=env;this.g=github;}
@@ -25,15 +70,24 @@ export class Playground {
   if(path==='/v1/playground/create'){
    if(!UUID.test(b.requestId||''))return {status:400,data:{error:'提交标识无效'}};
    let payload;try{payload=validateGeneration(b);}catch(e){return {status:400,data:{error:e.message}};}
-   const fingerprint=await digest(this.e.AUTH_PEPPER,JSON.stringify(payload));
+   let refBytes=null;
+   if(payload.ref_ext){
+    try{refBytes=decodeStdB64(b.reference_audio_b64);}catch{return {status:400,data:{error:'参考音频编码无效'}};}
+    if(refBytes.length<256||refBytes.length>MAX_REF_BYTES)return {status:413,data:{error:'参考音频片段过大'}};
+   }
+   const fingerprint=await digest(this.e.AUTH_PEPPER,JSON.stringify(payload)+':'+(refBytes?refBytes.length:0));
    const job=await this.locked(async()=>{
     const q=await this.state(),old=q.jobs.find(j=>j.id===b.requestId);
     if(old){if(old.owner!==b.id||old.fingerprint!==fingerprint)throw new Error('请求冲突');return old;}
     if(q.jobs.filter(active).length>=30||q.jobs.some(j=>j.owner===b.id&&active(j)))throw new Error('请等待已有任务完成');
-    const j={id:b.requestId,owner:b.id,fingerprint,status:'uploading',stage:'提交中',created:Date.now(),duration:payload.duration_seconds,key:randomSecret()};
+    const j={id:b.requestId,owner:b.id,fingerprint,status:'uploading',stage:'提交中',created:Date.now(),duration:payload.duration_seconds,key:randomSecret(),mode:payload.reference_mode||'none'};
     q.jobs.push(j);await this.save(q);return j;
    });
    if(job.status==='uploading'){
+    if(refBytes){
+     const encryptedRef=await encryptRefAudio(job.key,job.id,refBytes);
+     payload.ref_url=await this.g.uploadReleaseAsset('smart-'+job.id,'ref.bin',encryptedRef);
+    }
     const envelope=await seal(this.e.ARCHIVE_KEY,'playground:'+job.id,{id:'playground:'+job.id,request:payload});
     await this.g.commit([{path:'playground/requests/'+job.id+'.json',envelope}]);
     await this.locked(async()=>{const q=await this.state(),j=q.jobs.find(j=>j.id===job.id);if(j?.status==='uploading'){j.status='queued';j.stage='排队中';await this.save(q);}});

@@ -1,0 +1,82 @@
+import {ID, SECRET, digest, equal, seal, unseal, randomSecret} from './core.mjs';
+const UUID=/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const active=j=>['uploading','queued','running','publishing'].includes(j.status);
+export function validateGeneration(b){
+  if(typeof b.style!=='string'||!b.style.trim()||b.style.length>6000)throw new Error('请填写音乐描述（最多 6000 字）');
+  if(typeof b.lyrics!=='string'||b.lyrics.length>12000)throw new Error('歌词最多 12000 字');
+  if(!['song','instrumental'].includes(b.music_mode)||![30,60,120,180].includes(b.duration_seconds))throw new Error('生成选项无效');
+  if(b.music_mode==='song'&&!b.lyrics.trim())throw new Error('请填写歌词');
+  return {style:b.style.trim(),lyrics:b.music_mode==='song'?b.lyrics:'',music_mode:b.music_mode,duration_seconds:b.duration_seconds,count:1,cot:'full',ending_mode:'fade',kv_ram:false};
+}
+export class Playground {
+ constructor(storage,env,github){this.s=storage;this.e=env;this.g=github;}
+ async locked(fn){return this.s.sharingTransaction?this.s.sharingTransaction(fn,'smart-music-queue'):this.s.transaction(fn);}
+ async state(){return await this.s.get('playground/queue')||{jobs:[],workerAt:0,estimate:null};}
+ async save(q){await this.s.put('playground/queue',q);}
+ async handle(path,b,request){
+  const token=(request.headers.get('Authorization')||'').replace(/^Bearer /,'');
+  if(path==='/v1/playground/worker'){
+   if(!equal(token,await digest(this.e.AUTH_PEPPER,'salam-playground-worker-v1')))return {status:401,data:{error:'认证失败'}};
+   return {status:200,data:await this.worker(b)};
+  }
+  const a=ID.test(b.id||'')?await this.s.get('account/'+b.id):null;
+  const session=SECRET.test(token)?await digest(this.e.AUTH_PEPPER,'session:'+token):'';
+  if(!a||a.closedAt||a.deletingAt||a.deletedAt||!a.sessions?.[session]||a.sessions[session].expires<=Date.now())return {status:401,data:{error:'请先登录 Salam ID'}};
+  if(path==='/v1/playground/create'){
+   if(!UUID.test(b.requestId||''))return {status:400,data:{error:'提交标识无效'}};
+   let payload;try{payload=validateGeneration(b);}catch(e){return {status:400,data:{error:e.message}};}
+   const fingerprint=await digest(this.e.AUTH_PEPPER,JSON.stringify(payload));
+   const job=await this.locked(async()=>{
+    const q=await this.state(),old=q.jobs.find(j=>j.id===b.requestId);
+    if(old){if(old.owner!==b.id||old.fingerprint!==fingerprint)throw new Error('请求冲突');return old;}
+    if(q.jobs.filter(active).length>=30||q.jobs.some(j=>j.owner===b.id&&active(j)))throw new Error('请等待已有任务完成');
+    const j={id:b.requestId,owner:b.id,fingerprint,status:'uploading',stage:'提交中',created:Date.now(),duration:payload.duration_seconds,key:randomSecret()};
+    q.jobs.push(j);await this.save(q);return j;
+   });
+   if(job.status==='uploading'){
+    const envelope=await seal(this.e.ARCHIVE_KEY,'playground:'+job.id,{id:'playground:'+job.id,request:payload});
+    await this.g.commit([{path:'playground/requests/'+job.id+'.json',envelope}]);
+    await this.locked(async()=>{const q=await this.state(),j=q.jobs.find(j=>j.id===job.id);if(j?.status==='uploading'){j.status='queued';j.stage='排队中';await this.save(q);}});
+   }
+   return {status:200,data:{jobId:job.id}};
+  }
+  if(path==='/v1/playground/list')return {status:200,data:await this.locked(async()=>{
+   const q=await this.state();let ahead=0,wait=0,known=Number.isFinite(q.estimate),online=Date.now()-q.workerAt<180000;
+   const jobs=q.jobs.map(j=>{
+    const running=['running','publishing'].includes(j.status),eta=known?Math.max(0,Math.round(q.estimate*j.duration-(running?(Date.now()-(j.started||Date.now()))/1000:0))):null;
+    const out={id:j.id,mine:j.owner===b.id,status:j.status,stage:j.stage,created:j.created,completed:j.completed,total:j.total,duration:j.duration,position:j.status==='queued'?ahead+1:0,waitSeconds:known&&online?Math.round(wait):null,etaSeconds:online?eta:null};
+    if(active(j)){ahead++;if(eta===null)known=false;else wait+=eta;}
+    return out;
+   });return {jobs:jobs.reverse().slice(0,100),online,serverTime:Date.now()};
+  })};
+  if(path==='/v1/playground/result'){
+   const q=await this.state(),j=q.jobs.find(j=>j.id===b.jobId);
+   if(!j||j.status!=='succeeded')return {status:404,data:{error:'作品尚未完成'}};
+   return {status:200,data:{url:j.url,key:j.key,jobId:j.id}};
+  }
+  if(path==='/v1/playground/cancel')return {status:200,data:await this.locked(async()=>{const q=await this.state(),j=q.jobs.find(j=>j.id===b.jobId&&j.owner===b.id);if(!j||!['queued','uploading'].includes(j.status))return {error:'只能取消尚未开始的任务'};j.status='cancelled';j.stage='已取消';await this.save(q);return {ok:true};})};
+  return {status:404,data:{error:'接口不存在'}};
+ }
+ async worker(b){
+  const result=await this.locked(async()=>{
+   const q=await this.state();q.workerAt=Date.now();
+   if(Number.isFinite(b.estimate)&&b.estimate>0&&b.estimate<1000)q.estimate=b.estimate;
+   let j=q.jobs.find(j=>['running','publishing'].includes(j.status));
+   if(b.action==='claim'&&!j&&b.ready){j=q.jobs.find(j=>j.status==='queued');if(j){j.status='running';j.stage='准备生成';j.started=Date.now();j.lease=randomSecret();}}
+   if(b.action==='report'&&j&&j.id===b.jobId&&equal(j.lease,b.lease||'')){
+    if(['running','publishing','failed','succeeded'].includes(b.status)){
+     if(b.status==='succeeded'&&!String(b.url||'').startsWith('https://github.com/'+this.e.GITHUB_REPOSITORY+'/releases/download/'))throw new Error('产物地址无效');
+     j.status=b.status;j.stage=String(b.stage||'').slice(0,80);j.completed=Number.isFinite(b.completed)?Math.max(0,b.completed):null;j.total=Number.isFinite(b.total)&&b.total>0?b.total:null;
+     if(b.status==='succeeded')j.url=b.url;
+    }
+   }
+   await this.save(q);return j&&active(j)?{...j}:null;
+  });
+  if(result&&b.action==='claim'){
+   const f=await this.g.send(this.g.root+'/contents/playground/requests/'+result.id+'.json');
+   const payload=await unseal(this.e.ARCHIVE_KEY,'playground:'+result.id,JSON.parse(atob(f.content.replace(/\s/g,''))));
+   return {job:{id:result.id,lease:result.lease,key:result.key,request:payload.request}};
+  }
+  return {ok:true};
+ }
+}

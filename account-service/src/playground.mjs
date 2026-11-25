@@ -2,7 +2,7 @@ import {ID, SECRET, digest, equal, seal, unseal, randomSecret, unb64} from './co
 const UUID=/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const active=j=>['uploading','queued','running','publishing'].includes(j.status);
 const REF_MODES=['none','continue','remix'];
-const REF_EXTS=['ogg','mp3','wav','flac','m4a'];
+const REF_EXTS=['ogg','mp3','wav','flac','m4a','aac','opus','webm','aiff','wma'];
 const MAX_REF_BYTES=750000;
 function decodeStdB64(input){
   const raw=atob(String(input||'').replace(/\s+/g,''));
@@ -81,7 +81,7 @@ export class Playground {
    const job=await this.locked(async()=>{
     const q=await this.state(),old=q.jobs.find(j=>j.id===b.requestId);
     if(old){if(old.owner!==b.id||old.fingerprint!==fingerprint)throw new Error('请求冲突');return old;}
-    if(q.jobs.filter(active).length>=30||q.jobs.some(j=>j.owner===b.id&&active(j)))throw new Error('请等待已有任务完成');
+    if(q.jobs.filter(active).length>=30||q.jobs.filter(j=>j.owner===b.id&&active(j)).length>=3)throw new Error('最多同时排队或生成 3 首作品');
     const j={id:b.requestId,owner:b.id,fingerprint,status:'uploading',stage:'提交中',created:Date.now(),duration:payload.duration_seconds,key:randomSecret(),mode:payload.reference_mode||'none'};
     q.jobs.push(j);await this.save(q);return j;
    });
@@ -100,7 +100,7 @@ export class Playground {
    const q=await this.state();let ahead=0,wait=0,known=Number.isFinite(q.estimate),online=Date.now()-q.workerAt<180000;
    const jobs=q.jobs.map(j=>{
     const running=['running','publishing'].includes(j.status),eta=known?Math.max(0,Math.round(q.estimate*j.duration-(running?(Date.now()-(j.started||Date.now()))/1000:0))):null;
-    const out={id:j.id,mine:j.owner===b.id,status:j.status,stage:j.stage,created:j.created,completed:j.completed,total:j.total,duration:j.duration,position:j.status==='queued'?ahead+1:0,waitSeconds:known&&online?Math.round(wait):null,etaSeconds:online?eta:null};
+    const out={id:j.id,mine:j.owner===b.id,status:j.status,stage:j.stage,title:j.title||'',created:j.created,completed:j.completed,total:j.total,duration:j.duration,position:j.status==='queued'?ahead+1:0,waitSeconds:known&&online?Math.round(wait):null,etaSeconds:online?eta:null};
     if(active(j)){ahead++;if(eta===null)known=false;else wait+=eta;}
     return out;
    });return {jobs:jobs.reverse().slice(0,100),online,serverTime:Date.now()};
@@ -108,7 +108,13 @@ export class Playground {
   if(path==='/v1/playground/result'){
    const q=await this.state(),j=q.jobs.find(j=>j.id===b.jobId);
    if(!j||j.status!=='succeeded')return {status:404,data:{error:'作品尚未完成'}};
-   return {status:200,data:{url:j.url,key:j.key,jobId:j.id}};
+   return {status:200,data:{url:j.url,key:j.key,jobId:j.id,title:j.title||''}};
+  }
+  if(path==='/v1/playground/rename'){
+   if(!UUID.test(b.jobId||''))return {status:400,data:{error:'作品标识无效'}};
+   const title=typeof b.title==='string'?b.title.trim().slice(0,120):'';
+   if(!title)return {status:400,data:{error:'请输入作品名称'}};
+   return {status:200,data:await this.locked(async()=>{const q=await this.state(),j=q.jobs.find(x=>x.id===b.jobId&&x.owner===b.id);if(!j)return {error:'作品不存在或无权修改'};j.title=title;await this.save(q);return {ok:true,jobId:j.id,title};})};
   }
   if(path==='/v1/playground/cancel')return {status:200,data:await this.locked(async()=>{const q=await this.state(),j=q.jobs.find(j=>j.id===b.jobId&&j.owner===b.id);if(!j||!['queued','uploading'].includes(j.status))return {error:'只能取消尚未开始的任务'};j.status='cancelled';j.stage='已取消';await this.save(q);return {ok:true};})};
   if(path==='/v1/playground/delete'){
@@ -148,12 +154,21 @@ export class Playground {
   const result=await this.locked(async()=>{
    const q=await this.state();q.workerAt=Date.now();
    if(Number.isFinite(b.estimate)&&b.estimate>0&&b.estimate<1000)q.estimate=b.estimate;
-   let j=q.jobs.find(j=>['running','publishing'].includes(j.status));
-   if(b.action==='claim'&&!j&&b.ready){j=q.jobs.find(j=>j.status==='queued');if(j){j.status='running';j.stage='准备生成';j.started=Date.now();j.lease=randomSecret();}}
-   if(b.action==='report'&&j&&j.id===b.jobId&&equal(j.lease,b.lease||'')){
+   const maxSlots=Math.min(3,Math.max(1,Number(b.slots)||1));
+   const runningCount=q.jobs.filter(x=>['running','publishing'].includes(x.status)).length;
+   let j=null;
+   if(b.action==='claim'&&b.ready&&runningCount<maxSlots){
+    j=q.jobs.find(x=>x.status==='queued');
+    if(j){j.status='running';j.stage='准备生成';j.started=Date.now();j.lease=randomSecret();}
+   }
+   if(b.action==='report'){
+    j=q.jobs.find(x=>x.id===b.jobId&&['running','publishing'].includes(x.status));
+   }
+   if(b.action==='report'&&j&&equal(j.lease,b.lease||'')){
     if(['running','publishing','failed','succeeded'].includes(b.status)){
      if(b.status==='succeeded'&&!String(b.url||'').startsWith('https://github.com/'+this.e.GITHUB_REPOSITORY+'/releases/download/'))throw new Error('产物地址无效');
      j.status=b.status;j.stage=String(b.stage||'').slice(0,80);j.completed=Number.isFinite(b.completed)?Math.max(0,b.completed):null;j.total=Number.isFinite(b.total)&&b.total>0?b.total:null;
+     if(typeof b.title==='string'&&b.title.trim()&&!j.title)j.title=b.title.trim().slice(0,120);
      if(b.status==='succeeded')j.url=b.url;
     }
    }

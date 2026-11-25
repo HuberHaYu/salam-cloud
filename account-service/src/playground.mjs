@@ -78,35 +78,61 @@ export class Playground {
     if(refBytes.length<256||refBytes.length>MAX_REF_BYTES)return {status:413,data:{error:'参考音频片段过大'}};
    }
    const fingerprint=await digest(this.e.AUTH_PEPPER,JSON.stringify(payload)+':'+(refBytes?refBytes.length:0));
-   const job=await this.locked(async()=>{
-    const q=await this.state(),old=q.jobs.find(j=>j.id===b.requestId);
-    if(old){if(old.owner!==b.id||old.fingerprint!==fingerprint)throw new Error('请求冲突');return old;}
-    if(q.jobs.filter(active).length>=30||q.jobs.filter(j=>j.owner===b.id&&active(j)).length>=3)throw new Error('最多同时排队或生成 3 首作品');
-    const j={id:b.requestId,owner:b.id,fingerprint,status:'uploading',stage:'提交中',created:Date.now(),duration:payload.duration_seconds,key:randomSecret(),mode:payload.reference_mode||'none'};
-    q.jobs.push(j);await this.save(q);return j;
-   });
+   let job;
+   try{
+    job=await this.locked(async()=>{
+     const q=await this.state(),now=Date.now();
+     q.jobs=q.jobs.filter(j=>!(j.status==='uploading'&&now-(j.created||0)>300000));
+     const old=q.jobs.find(j=>j.id===b.requestId);
+     if(old){if(old.owner!==b.id||old.fingerprint!==fingerprint)throw new Error('请求冲突');return old;}
+     if(payload.source_job_id){
+      const src=q.jobs.find(j=>j.id===payload.source_job_id&&j.owner===b.id&&j.status==='succeeded');
+      if(!src)throw new Error('参考作品不存在或无权引用');
+     }
+     if(q.jobs.filter(active).length>=30||q.jobs.filter(j=>j.owner===b.id&&active(j)).length>=3)throw new Error('最多同时排队或生成 3 首作品');
+     const j={id:b.requestId,owner:b.id,fingerprint,status:'uploading',stage:'提交中',created:now,duration:payload.duration_seconds,key:randomSecret(),mode:payload.reference_mode||'none'};
+     q.jobs.push(j);await this.save(q);return j;
+    });
+   }catch(e){return {status:400,data:{error:e?.message||'提交失败，请重试'}};}
    if(job.status==='uploading'){
-    if(refBytes){
-     const encryptedRef=await encryptRefAudio(job.key,job.id,refBytes);
-     payload.ref_url=await this.g.uploadReleaseAsset('smart-'+job.id,'ref.bin',encryptedRef);
+    try{
+     if(refBytes){
+      const encryptedRef=await encryptRefAudio(job.key,job.id,refBytes);
+      payload.ref_url=await this.g.uploadReleaseAsset('smart-'+job.id,'ref.bin',encryptedRef);
+     }
+     const envelope=await seal(this.e.ARCHIVE_KEY,'playground:'+job.id,{id:'playground:'+job.id,owner:b.id,request:payload});
+     await this.g.commit([{path:'playground/requests/'+job.id+'.json',envelope}]);
+     await this.locked(async()=>{const q=await this.state(),j=q.jobs.find(j=>j.id===job.id);if(j?.status==='uploading'){j.status='queued';j.stage='排队中';await this.save(q);}});
+    }catch(err){
+     await this.locked(async()=>{
+      const q=await this.state();
+      q.jobs=q.jobs.filter(x=>!(x.id===job.id&&x.owner===b.id&&x.status==='uploading'));
+      await this.save(q);
+     }).catch(()=>{});
+     await this.deleteArtifacts(job.id).catch(()=>{});
+     throw err;
     }
-    const envelope=await seal(this.e.ARCHIVE_KEY,'playground:'+job.id,{id:'playground:'+job.id,request:payload});
-    await this.g.commit([{path:'playground/requests/'+job.id+'.json',envelope}]);
-    await this.locked(async()=>{const q=await this.state(),j=q.jobs.find(j=>j.id===job.id);if(j?.status==='uploading'){j.status='queued';j.stage='排队中';await this.save(q);}});
    }
    return {status:200,data:{jobId:job.id}};
   }
   if(path==='/v1/playground/list')return {status:200,data:await this.locked(async()=>{
-   const q=await this.state();let ahead=0,wait=0,known=Number.isFinite(q.estimate),online=Date.now()-q.workerAt<180000;
-   const jobs=q.jobs.map(j=>{
-    const running=['running','publishing'].includes(j.status),eta=known?Math.max(0,Math.round(q.estimate*j.duration-(running?(Date.now()-(j.started||Date.now()))/1000:0))):null;
-    const out={id:j.id,mine:j.owner===b.id,status:j.status,stage:j.stage,title:j.title||'',created:j.created,completed:j.completed,total:j.total,duration:j.duration,position:j.status==='queued'?ahead+1:0,waitSeconds:known&&online?Math.round(wait):null,etaSeconds:online?eta:null};
+   const q=await this.state(),now=Date.now();
+   const beforeLen=q.jobs.length;
+   q.jobs=q.jobs.filter(j=>!(j.status==='uploading'&&now-(j.created||0)>300000));
+   if(q.jobs.length!==beforeLen)await this.save(q);
+   let ahead=0,wait=0,known=Number.isFinite(q.estimate),online=now-q.workerAt<180000;
+   const mineJobs=[];
+   for(const j of q.jobs){
+    const running=['running','publishing'].includes(j.status),eta=known?Math.max(0,Math.round(q.estimate*j.duration-(running?(now-(j.started||now))/1000:0))):null;
+    if(j.owner===b.id){
+     mineJobs.push({id:j.id,mine:true,status:j.status,stage:j.stage,title:j.title||'',created:j.created,completed:j.completed,total:j.total,duration:j.duration,position:j.status==='queued'?ahead+1:0,waitSeconds:known&&online?Math.round(wait):null,etaSeconds:online?eta:null});
+    }
     if(active(j)){ahead++;if(eta===null)known=false;else wait+=eta;}
-    return out;
-   });return {jobs:jobs.reverse().slice(0,100),online,serverTime:Date.now()};
+   }
+   return {jobs:mineJobs.reverse().slice(0,100),online,serverTime:now};
   })};
   if(path==='/v1/playground/result'){
-   const q=await this.state(),j=q.jobs.find(j=>j.id===b.jobId);
+   const q=await this.state(),j=q.jobs.find(j=>j.id===b.jobId&&j.owner===b.id);
    if(!j||j.status!=='succeeded')return {status:404,data:{error:'作品尚未完成'}};
    return {status:200,data:{url:j.url,key:j.key,jobId:j.id,title:j.title||''}};
   }
@@ -122,7 +148,8 @@ export class Playground {
    const target=await this.locked(async()=>{
     const q=await this.state(),j=q.jobs.find(x=>x.id===b.jobId&&x.owner===b.id);
     if(!j)return {status:404,data:{error:'作品不存在或无权删除'}};
-    if(['uploading','running','publishing'].includes(j.status))return {status:409,data:{error:'任务进行中，请稍后再删除'}};
+    const staleUploading=j.status==='uploading'&&Date.now()-(j.created||0)>120000;
+    if(['running','publishing'].includes(j.status)||(j.status==='uploading'&&!staleUploading))return {status:409,data:{error:'任务进行中，请稍后再删除'}};
     j.status='deleting';j.stage='删除中';await this.save(q);return {ok:true};
    });
    if(target.status)return target;
@@ -151,6 +178,17 @@ export class Playground {
   catch(e){if(e.status!==404&&e.status!==422)throw e;}
  }
  async worker(b){
+  if(b.action==='purge_all'){
+   const ids=await this.locked(async()=>{
+    const q=await this.state();
+    const allIds=q.jobs.map(j=>j.id);
+    q.jobs=[];
+    await this.save(q);
+    return allIds;
+   });
+   for(const id of ids){await this.deleteArtifacts(id).catch(()=>{});}
+   return {ok:true,purged:ids.length};
+  }
   const result=await this.locked(async()=>{
    const q=await this.state();q.workerAt=Date.now();
    if(Number.isFinite(b.estimate)&&b.estimate>0&&b.estimate<1000)q.estimate=b.estimate;

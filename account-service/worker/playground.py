@@ -143,9 +143,9 @@ while True:
             if f.get('local_id'):
                 j=request(LOCAL+'/api/jobs/'+f['local_id']);state=j['status'];data={'action':'report','jobId':f['id'],'lease':f['lease'],'status':'running','stage':j.get('stage','生成中'),'completed':j.get('completed'),'total':j.get('total')}
                 if state=='succeeded':
-                    cloud(dict(data,status='publishing',stage='保存作品',completed=None,total=None))
+                    cloud(dict(data,status='publishing',stage='保存作品',completed=985,total=1000))
                     save_job_map(f['id'],f['local_id'])
-                    data.update(status='succeeded',stage='完成',url=publish(f),title=extract_song_title(f),completed=1,total=1)
+                    data.update(status='succeeded',stage='完成',url=publish(f),title=extract_song_title(f),completed=1000,total=1000)
                 elif state in ('failed','cancelled','interrupted'):data.update(status='failed',stage='生成未完成，请重新提交',completed=None,total=None)
                 cloud(data)
                 if data['status'] in ('succeeded','failed'):
@@ -153,5 +153,6 @@ while True:
                     flights.pop(fid,None);save_flights(flights)
     except Exception as exc:
         # Do not print request bodies, credentials, lyrics, signed URLs or raw HTTP responses.
-        print('Bridge retry:',type(exc).__name__,flush=True)
-    time.sleep(10)
+        reason=getattr(exc,'reason',None)
+        print('Bridge retry:',type(exc).__name__,type(reason).__name__ if reason else '',getattr(reason,'errno','') if reason else '',flush=True)
+    time.sleep(3 if flights else 8)

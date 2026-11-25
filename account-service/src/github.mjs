@@ -81,21 +81,37 @@ export class GitHubArchive {
   async commit(files) {
     if (!files.length) return;
     const branch=encodeURIComponent(this.env.GITHUB_BRANCH||'main');
-    const ref=await this.send(this.root+'/git/ref/heads/'+branch);
-    const parent=await this.send(this.root+'/git/commits/'+ref.object.sha);
-    const tree=await this.send(this.root+'/git/trees','POST',{base_tree:parent.tree.sha,
-      tree:files.map(f=>({path:f.path||'accounts/v1/'+f.id+'.json',mode:'100644',type:'blob',
-        ...(f.remove?{sha:null}:{content:JSON.stringify(f.envelope)})}))});
-    const commit=await this.send(this.root+'/git/commits','POST',{message:'Salam ID encrypted checkpoint',tree:tree.sha,parents:[ref.object.sha]});
-    // Non-fast-forward is deliberately rejected. A later alarm rebuilds on the latest branch.
-    await this.send(this.root+'/git/refs/heads/'+branch,'PATCH',{sha:commit.sha,force:false});
+    const maxAttempts=6;
+    for(let attempt=0;attempt<maxAttempts;attempt++){
+      const ref=await this.send(this.root+'/git/ref/heads/'+branch);
+      const parent=await this.send(this.root+'/git/commits/'+ref.object.sha);
+      const tree=await this.send(this.root+'/git/trees','POST',{base_tree:parent.tree.sha,
+        tree:files.map(f=>({path:f.path||'accounts/v1/'+f.id+'.json',mode:'100644',type:'blob',
+          ...(f.remove?{sha:null}:{content:JSON.stringify(f.envelope)})}))});
+      const commit=await this.send(this.root+'/git/commits','POST',{message:'Salam ID encrypted checkpoint',tree:tree.sha,parents:[ref.object.sha]});
+      try{
+        await this.send(this.root+'/git/refs/heads/'+branch,'PATCH',{sha:commit.sha,force:false});
+        return;
+      }catch(e){
+        if((e?.status===409||e?.status===422)&&attempt<maxAttempts-1){
+          await new Promise(r=>setTimeout(r,150+Math.floor(Math.random()*250)*(attempt+1)));
+          continue;
+        }
+        throw e;
+      }
+    }
   }
   async uploadReleaseAsset(tag,name,bytes) {
     let release;
     try { release=await this.send(this.root+'/releases/tags/'+encodeURIComponent(tag)); }
     catch(e) {
       if(e.status!==404) throw e;
-      release=await this.send(this.root+'/releases','POST',{tag_name:tag,name:tag,body:'Encrypted Salam Smart Music artifact',draft:false,prerelease:true});
+      try {
+        release=await this.send(this.root+'/releases','POST',{tag_name:tag,name:tag,body:'Encrypted Salam Smart Music artifact',draft:false,prerelease:true});
+      } catch(createErr) {
+        if(createErr?.status===422) release=await this.send(this.root+'/releases/tags/'+encodeURIComponent(tag));
+        else throw createErr;
+      }
     }
     const existing=(release.assets||[]).find(a=>a.name===name);
     if(existing?.browser_download_url) return existing.browser_download_url;

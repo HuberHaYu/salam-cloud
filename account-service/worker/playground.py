@@ -93,7 +93,16 @@ while True:
             if not f.get('local_id'):
                 seed=int(hashlib.sha256(f['id'].encode()).hexdigest()[:12],16)
                 jobs=request(LOCAL+'/api/jobs');match=next((j for j in jobs if j['request'].get('seed')==seed and j['request'].get('style')==f['request']['style']),None)
-                if not match and status['ready'] and not status['busy']:match=request(LOCAL+'/api/jobs',build_local_request(f,seed))
+                if not match and status['ready'] and not status['busy']:
+                    try:
+                        match=request(LOCAL+'/api/jobs',build_local_request(f,seed))
+                    except urllib.error.HTTPError as he:
+                        if 400<=he.code<500:
+                            cloud({'action':'report','jobId':f['id'],'lease':f['lease'],'status':'failed','stage':'参数校验未通过，请重新提交','completed':None,'total':None})
+                            cleanup_reference(f['id'])
+                            STATE.unlink(missing_ok=True)
+                            continue
+                        raise
                 if match:f['local_id']=match['id'];save(f)
             if f.get('local_id'):
                 j=request(LOCAL+'/api/jobs/'+f['local_id']);state=j['status'];data={'action':'report','jobId':f['id'],'lease':f['lease'],'status':'running','stage':j.get('stage','生成中'),'completed':j.get('completed'),'total':j.get('total')}

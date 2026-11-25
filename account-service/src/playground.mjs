@@ -26,7 +26,9 @@ export function validateGeneration(b){
   if((refMode!=='continue'&&!rawStyle)||rawStyle.length>6000)throw new Error('请填写音乐描述（最多 6000 字）');
   const style=rawStyle||'continue smoothly in the same style and timbre';
   if(typeof b.lyrics!=='string'||b.lyrics.length>12000)throw new Error('歌词最多 12000 字');
-  if(!['song','instrumental'].includes(b.music_mode)||![30,60,120,180].includes(b.duration_seconds))throw new Error('生成选项无效');
+  const dur=Number(b.duration_seconds);
+  const validDur=refMode==='none'?[30,60,120,180].includes(dur):(Number.isInteger(dur)&&dur>=15&&dur<=360);
+  if(!['song','instrumental'].includes(b.music_mode)||!validDur)throw new Error('生成选项无效');
   if(b.music_mode==='song'&&!b.lyrics.trim())throw new Error('请填写歌词');
   const out={style,lyrics:b.music_mode==='song'?b.lyrics:'',music_mode:b.music_mode,duration_seconds:b.duration_seconds,count:1,cot:'full',ending_mode:'fade',kv_ram:false};
   if(refMode!=='none'){
